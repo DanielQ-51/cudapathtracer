@@ -1,0 +1,20 @@
+# This file uses centimeters as units for non-parametric coordinates.
+
+mtllib rightwall.mtl
+g default
+v 1.447581 -0.915393 -3.069219
+v 1.447581 -0.915393 3.392396
+v 1.447581 1.530922 3.392396
+v 1.447581 1.530922 -3.069219
+vt 0.604172 0.489541
+vt 0.604172 0.259939
+vt 0.604172 0.259939
+vt 0.604172 0.489541
+vn -1.000000 0.000000 0.000000
+vn -1.000000 0.000000 0.000000
+vn -1.000000 0.000000 0.000000
+vn -1.000000 0.000000 0.000000
+s off
+g polySurface4 pCube1
+usemtl initialShadingGroup
+f 1/1/1 2/2/2 3/3/3 4/4/4

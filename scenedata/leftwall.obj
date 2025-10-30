@@ -1,0 +1,20 @@
+# This file uses centimeters as units for non-parametric coordinates.
+
+mtllib leftwall.mtl
+g default
+v -1.493262 -0.915393 3.392396
+v -1.493262 -0.915393 -3.069219
+v -1.493262 1.530922 -3.069219
+v -1.493262 1.530922 3.392396
+vt 0.392541 0.259939
+vt 0.392541 0.489541
+vt 0.392541 0.489541
+vt 0.392541 0.259939
+vn 1.000000 0.000000 0.000000
+vn 1.000000 0.000000 0.000000
+vn 1.000000 0.000000 0.000000
+vn 1.000000 0.000000 0.000000
+s off
+g polySurface2 pCube1
+usemtl initialShadingGroup
+f 1/1/1 2/2/2 3/3/3 4/4/4

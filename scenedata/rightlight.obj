@@ -1,0 +1,20 @@
+# This file uses centimeters as units for non-parametric coordinates.
+
+mtllib rightlight.mtl
+g default
+v 0.292564 -0.822075 -2.658400
+v 0.182145 -0.776589 -2.883933
+v 0.218024 -0.545820 -2.566190
+v 0.107605 -0.500334 -2.791724
+vt 0.375000 0.750000
+vt 0.625000 0.750000
+vt 0.625000 1.000000
+vt 0.375000 1.000000
+vn 0.866782 0.351840 -0.353410
+vn 0.866782 0.351840 -0.353410
+vn 0.866782 0.351840 -0.353410
+vn 0.866782 0.351840 -0.353410
+s off
+g pCube2
+usemtl light4:initialShadingGroup1
+f 3/1/1 4/2/2 2/3/3 1/4/4
