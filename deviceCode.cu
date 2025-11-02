@@ -21,11 +21,11 @@
 
     colors[pixelIdx] = make_float4 ((1.0f * x)/w,(1.0f * y)/w, 0.0f, 0.0f);
 }*/
-__device__ void triangleIntersect(Vertex* verts, Triangle* tri, const Ray& r, float4& barycentric, float& tval)
+__device__ void triangleIntersect(Vertices* verts, Triangle* tri, const Ray& r, float4& barycentric, float& tval)
 {
-    float4 tria = verts[tri->aInd].position;
-    float4 trib = verts[tri->bInd].position;
-    float4 tric = verts[tri->cInd].position;
+    float4 tria = verts->positions[tri->aInd];
+    float4 trib = verts->positions[tri->bInd];
+    float4 tric = verts->positions[tri->cInd];
     float4 e1 = trib - tria;
     float4 e2 = tric - tria;
 
@@ -101,7 +101,7 @@ __device__ bool aabbIntersect(const Ray& r, float4 minCorner, float4 maxCorner, 
     return (tmax >= tmin) && (tmax > 0.0f);
 }
 
-__device__ void BVHSceneIntersect(const Ray& r, BVHnode* BVH, int* BVHindices,Vertex* verts, Triangle* scene, Intersection& intersect, float max_t = 999999.0f, bool shortCircuit = false)
+__device__ void BVHSceneIntersect(const Ray& r, BVHnode* BVH, int* BVHindices, Vertices* verts, Triangle* scene, Intersection& intersect, float max_t = 999999.0f, bool shortCircuit = false)
 {
     intersect.valid = false;
     float min_t = 3.402823466e+38f;
@@ -140,8 +140,12 @@ __device__ void BVHSceneIntersect(const Ray& r, BVHnode* BVH, int* BVHindices,Ve
                 {
                     min_t = t; // Update the closest-hit distance
                     intersect.point = r.at(t);
-                    intersect.color = verts[tri->aInd].color * barycentric.z + verts[tri->bInd].color * barycentric.x + verts[tri->cInd].color * barycentric.y;
-                    intersect.normal = normalize(verts[tri->aInd].normal * barycentric.z + verts[tri->bInd].normal * barycentric.x + verts[tri->cInd].normal * barycentric.y);
+                    intersect.color = verts->colors[tri->aInd] * barycentric.z + 
+                                        verts->colors[tri->bInd] * barycentric.x + 
+                                        verts->colors[tri->cInd] * barycentric.y;
+                    intersect.normal = normalize(verts->normals[tri->naInd] * barycentric.z + 
+                                        verts->normals[tri->nbInd] * barycentric.x + 
+                                        verts->normals[tri->ncInd] * barycentric.y);
                     intersect.materialID = tri->materialID;
                     intersect.emission = tri->emission;
                     intersect.valid = true;
@@ -192,7 +196,7 @@ __device__ void BVHSceneIntersect(const Ray& r, BVHnode* BVH, int* BVHindices,Ve
     }
 }
 
-__device__ void sceneIntersection(const Ray& r, Vertex* verts, Triangle* scene, int triNum, 
+__device__ void sceneIntersection(const Ray& r, Vertices* verts, Triangle* scene, int triNum, 
     Intersection& intersect , float max_t = 999999.0f, bool shortCircuit = false)
 {
     intersect.valid = false;
@@ -214,8 +218,12 @@ __device__ void sceneIntersection(const Ray& r, Vertex* verts, Triangle* scene, 
             min_t = t;
             intersect.point = r.at(t);
             //intersect.normal = verts[tri->aInd].normal;
-            intersect.color = verts[tri->aInd].color * barycentric.z + verts[tri->bInd].color * barycentric.x + verts[tri->cInd].color * barycentric.y;
-            intersect.normal = normalize(verts[tri->aInd].normal * barycentric.z + verts[tri->bInd].normal * barycentric.x + verts[tri->cInd].normal * barycentric.y);
+            intersect.color = verts->colors[tri->aInd] * barycentric.z + 
+                                        verts->colors[tri->bInd] * barycentric.x + 
+                                        verts->colors[tri->cInd] * barycentric.y;
+            intersect.normal = normalize(verts->normals[tri->naInd] * barycentric.z + 
+                                        verts->normals[tri->nbInd] * barycentric.x + 
+                                        verts->normals[tri->ncInd] * barycentric.y);
             intersect.materialID = tri->materialID;
             intersect.emission = tri->emission;
             intersect.valid = true;
@@ -234,7 +242,7 @@ __global__ void initRNG(curandState* states, int width, int height, unsigned lon
     curand_init(seed, idx, 0, &states[idx]);  
 }
 
-__device__ void nextEventEstimation(curandState& localState, BVHnode* BVH, int* BVHindices, const float4& wo, Vertex* vertices, int vertNum,
+__device__ void nextEventEstimation(curandState& localState, BVHnode* BVH, int* BVHindices, const float4& wo, Vertices* vertices, int vertNum,
     Triangle* scene, int triNum, Triangle* lights, int lightNum, int materialID,const Intersection& intersect, 
     float& light_pdf, float4& contribution, Triangle* light = nullptr, const Intersection* newIntersect = nullptr)
 {
@@ -257,9 +265,9 @@ __device__ void nextEventEstimation(curandState& localState, BVHnode* BVH, int* 
         }
         int index = min(static_cast<int>(curand_uniform(&localState) * lightNum), lightNum - 1);
         l = lights[index];
-        apos = vertices[l.aInd].position;
-        bpos = vertices[l.bInd].position;
-        cpos = vertices[l.cInd].position;
+        apos = vertices->positions[l.aInd];
+        bpos = vertices->positions[l.bInd];
+        cpos = vertices->positions[l.cInd];
         u = sqrtf(curand_uniform(&localState));
         v = curand_uniform(&localState);
 
@@ -269,9 +277,9 @@ __device__ void nextEventEstimation(curandState& localState, BVHnode* BVH, int* 
     else 
     {
         l = *light;
-        apos = vertices[l.aInd].position;
-        bpos = vertices[l.bInd].position;
-        cpos = vertices[l.cInd].position;
+        apos = vertices->positions[l.aInd];
+        bpos = vertices->positions[l.bInd];
+        cpos = vertices->positions[l.cInd];
         p = newIntersect->point;
         n = newIntersect->normal;
     }
@@ -296,7 +304,7 @@ __device__ void nextEventEstimation(curandState& localState, BVHnode* BVH, int* 
     if (!sceneIntersect.valid && t != -1.0f) // direct LOS from intersection to light
     {
         float distanceSQR = lengthSquared(surfaceToLight);
-        float4 lightNormal = vertices[l.aInd].normal;
+        float4 lightNormal = vertices->normals[l.naInd];
 
         float cosThetaLight = fmaxf(dot(lightNormal, -wi), EPSILON);
         float cosThetaSurface = fmaxf(dot(n, wi), EPSILON);
@@ -309,12 +317,12 @@ __device__ void nextEventEstimation(curandState& localState, BVHnode* BVH, int* 
         float4 f_val;
         cosine_f(intersect.color, f_val);
 
-        contribution = f_val * Le / (light_pdf);
+        contribution = f_val * Le * cosThetaSurface / light_pdf;
     }
     else {}
 }
 
-__global__ void Li (curandState* rngStates, BVHnode* BVH, int* BVHindices, int maxDepth, Vertex* vertices, int vertNum, Triangle* scene, int triNum, 
+__global__ void Li (curandState* rngStates, BVHnode* BVH, int* BVHindices, int maxDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
     Triangle* lights, int lightNum, int numSample, bool useMIS, int w, int h, float4* colors)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -326,47 +334,53 @@ __global__ void Li (curandState* rngStates, BVHnode* BVH, int* BVHindices, int m
     float4 colorSum = f4();
 
     curandState localState = rngStates[pixelIdx];
-    float du = curand_uniform(&localState);
-    float dv = curand_uniform(&localState);
+    //float du = curand_uniform(&localState);
+    //float dv = curand_uniform(&localState);
 
-    float4 a = f4();
-    float4 cameraOrigin = f4();
-    Ray r = Ray();
-    float4 beta = f4();
-    float4 Li = f4();
-    int materialID = -1;
-    int depth = -1;
-    float4 f_val = f4();
-    float4 wo_local = f4();
-    float pdf = EPSILON;
-    float4 wo_world = f4();
-    float4 wi_world = f4();
-    float4 wi_local = f4();
-    float light_pdf = EPSILON;
-    float4 nee = f4();
-    Intersection intersect = Intersection();
-    Intersection previousintersect = Intersection();
-    float neeWeight = EPSILON; // reused for all MIS interactions
-    float bsdfWeight = EPSILON; // reused for all MIS interactions
-    float p = EPSILON;// for russian roulette
-    float luminance = EPSILON; // for russian roulette
+    //float4 a = f4();
+    //float4 cameraOrigin = f4();
+    //Ray r = Ray();
+    //float4 beta = f4();
+    //float4 Li = f4();
+    //int materialID = -1;
+    //int depth = -1;
+    //float4 f_val = f4();
+    //float4 wo_local = f4();
+    //float pdf = EPSILON;
+    //float4 wo_world;
+    //float4 wi_world = f4();
+    //float light_pdf = EPSILON;
+    //float4 nee = f4();
+    //Intersection intersect = Intersection();
+    //Intersection previousintersect = Intersection();
+    //float neeWeight = EPSILON; // reused for all MIS interactions
+    //float bsdfWeight = EPSILON; // reused for all MIS interactions
+    //float p = EPSILON;// for russian roulette
+    //float luminance = EPSILON; // for russian roulette
 
     for (int currSample = 0; currSample < numSample; currSample++)
     {   
-        beta = f4(1.0f, 1.0f, 1.0f);
-        Li = f4();
+        Ray r = Ray();
+        float4 beta = f4(1.0f, 1.0f, 1.0f);
+        float4 Li = f4();
+        float4 wi_local = f4();
+        float4 wo_local = f4();
+        Intersection previousintersect = Intersection();
 
-        du = curand_uniform(&localState);
-        dv = curand_uniform(&localState);
-        cameraOrigin = f4(0.0f,0.0f,1.0f);
-        a = f4(cameraOrigin.x + (x + 1.0f*du - 0.5f - w/2.0f) * (1.0f / w), 
-                        cameraOrigin.y + (y + 1.0f*dv - 0.5f - h/2.0f) * (1.0f / h),
+        //float du = curand_uniform(&localState);
+        //float dv = curand_uniform(&localState);
+        float4 cameraOrigin = f4(0.0f,0.0f,1.0f);
+        float4 a = f4(cameraOrigin.x + (x + 1.0f*curand_uniform(&localState) - 0.5f - w/2.0f) * (1.0f / w), 
+                        cameraOrigin.y + (y + 1.0f*curand_uniform(&localState) - 0.5f - h/2.0f) * (1.0f / h),
                         cameraOrigin.z-1.0f);
         r.origin = cameraOrigin;
         r.direction = a-cameraOrigin;
+        
 
-        for (depth = 0; depth < 100; depth++)
-        {
+        for (int depth = 0; depth < 12; depth++)
+        {   
+            float pdf = EPSILON;
+            Intersection intersect = Intersection();
             intersect.valid = false;
             //sceneIntersection(r, vertices, scene, triNum, intersect);
             BVHSceneIntersect(r, BVH, BVHindices, vertices, scene, intersect);
@@ -376,8 +390,7 @@ __global__ void Li (curandState* rngStates, BVHnode* BVH, int* BVHindices, int m
                 Li += beta * f4(0.4f,0.4f,0.7f);
                 break;
             }
-            materialID = intersect.materialID;
-
+            int materialID = intersect.materialID;
             if (lengthSquared(intersect.emission) > EPSILON)
             {
                 if (depth == 0)
@@ -386,42 +399,44 @@ __global__ void Li (curandState* rngStates, BVHnode* BVH, int* BVHindices, int m
                 }
                 else if (useMIS)
                 {
+                    float4 nee;
+                    float light_pdf = EPSILON;
                     nextEventEstimation(localState, BVH, BVHindices, wi_local, vertices, vertNum, scene, 
                         triNum, lights, lightNum, materialID, previousintersect, light_pdf, 
                         nee, &intersect.tri, &previousintersect);
                     
                     if (light_pdf > EPSILON)
                     {
-                        bsdfWeight = pdf * pdf / (light_pdf * light_pdf 
+                        float bsdfWeight = pdf * pdf / (light_pdf * light_pdf 
                         + pdf * pdf);
                         Li += beta * intersect.emission * bsdfWeight;
                     }
-                    
-                    
-                    
                 }
             }
 
             toLocal(-r.direction, intersect.normal, wi_local);
-            wi_world = normalize(-r.direction);
+            //wi_world = normalize(-r.direction);
 
-            if (useMIS)
+            if (useMIS && lengthSquared(intersect.emission) < EPSILON)
             {
+                float4 nee;
+                float light_pdf = EPSILON;
                 nextEventEstimation(localState, BVH, BVHindices, wi_local, vertices, vertNum, scene, 
                 triNum, lights, lightNum, materialID, intersect, light_pdf, nee);
 
                 if (light_pdf > EPSILON)
                 {
-                    neeWeight = light_pdf * light_pdf / (fmaxf(wi_local.z, EPSILON)/PI * fmaxf(wi_local.z, EPSILON)/PI + light_pdf * light_pdf);
+                    float neeWeight = light_pdf * light_pdf / (fmaxf(wo_local.z, EPSILON)/PI * fmaxf(wo_local.z, EPSILON)/PI + light_pdf * light_pdf);
 
                     Li += beta * nee * neeWeight;
                 }
                 
             }
-
+            float4 f_val = f4();
             cosine_f(intersect.color, f_val);
             cosine_sample_f(localState, wo_local, pdf);
 
+            float4 wo_world= f4();
             toWorld(wo_local, intersect.normal, wo_world);
             
             if (pdf < EPSILON) 
@@ -431,8 +446,8 @@ __global__ void Li (curandState* rngStates, BVHnode* BVH, int* BVHindices, int m
 
             if (depth > maxDepth)
             {
-                luminance = dot(beta, f4(0.2126f, 0.7152f, 0.0722f));
-                p = clamp(luminance, 0.05f, 0.99f);
+                float luminance = dot(beta, f4(0.2126f, 0.7152f, 0.0722f));
+                float p = clamp(luminance, 0.05f, 0.99f);
 
                 if (curand_uniform(&localState) > p)   // survive with probability p
                     break;
@@ -450,7 +465,7 @@ __global__ void Li (curandState* rngStates, BVHnode* BVH, int* BVHindices, int m
     rngStates[pixelIdx] = localState;
 }
 
-__host__ void launch(int maxDepth, BVHnode* BVH, int* BVHindices, Vertex* vertices, int vertNum, Triangle* scene, int triNum, 
+__host__ void launch(int maxDepth, BVHnode* BVH, int* BVHindices, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
     Triangle* lights, int lightNum, int numSample, bool useMIS, int w, int h, float4* colors)
 {
     dim3 blockSize(16, 16);  

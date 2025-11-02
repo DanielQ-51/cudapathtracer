@@ -8,20 +8,23 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <chrono>
+#include <set>
 
 using namespace std;
 
-void readObjSimple(string filename, vector<Vertex>& vertices, 
+void readObjSimple(string filename, vector<float4>& points, vector<float4>& normals, vector<float4>& colors, 
     vector<Triangle>& mesh, vector<Triangle>& lights, float4 c, float4 e, int materialID);
 
-void computeInfoForBVH(vector<Vertex>& vertices, vector<Triangle>& mesh, vector<float4>& centroids, vector<float4>& AABBmins, vector<float4>& AABBmaxes)
+void computeInfoForBVH(Vertices& vertices, vector<Triangle>& mesh, vector<float4>& centroids, 
+    vector<float4>& AABBmins, vector<float4>& AABBmaxes)
 {
     for (int i = 0; i < mesh.size(); i++)
     {
         Triangle tri = mesh[i];
-        float4 a = vertices[tri.aInd].position;
-        float4 b = vertices[tri.bInd].position;
-        float4 c = vertices[tri.cInd].position;
+        float4 a = vertices.positions[tri.aInd];
+        float4 b = vertices.positions[tri.bInd];
+        float4 c = vertices.positions[tri.cInd];
         centroids.push_back(f4((a.x+b.x+c.x)/3.0f,(a.y+b.y+c.y)/3.0f,(a.z+b.z+c.z)/3.0f));
 
         // Compute AABB min
@@ -58,9 +61,9 @@ int partitionPrimitives(vector<int>& indices, vector<float4>& centroids, int sta
 }
 
 void SAH( vector<int>& indices, vector<float4>& centroids, vector<float4>& AABBmins, vector<float4>& AABBmaxes, int start, 
-    int end, int axis, float4 minBound, float4 maxBound, float& splitPos, float& minCost)
+    int end, int& axis, float4 minBound, float4 maxBound, float& splitPos, float& minCost, int& backup)
 {
-    const int numBuckets = 40;
+    const int numBuckets = 20;
     struct Bucket { float4 min, max; int count; };
     Bucket buckets[numBuckets];
     for (int i = 0; i < numBuckets; i++) 
@@ -82,7 +85,8 @@ void SAH( vector<int>& indices, vector<float4>& centroids, vector<float4>& AABBm
     }
 
     minCost = FLT_MAX;
-    int bestSplit = 0;
+    int bestSplit = -1;
+    
     for (int i = 1; i < numBuckets; i++) 
     {
         float4 leftMin = buckets[0].min;
@@ -110,7 +114,19 @@ void SAH( vector<int>& indices, vector<float4>& centroids, vector<float4>& AABBm
             bestSplit = i;
         }
     }
-    splitPos = getFloat4Component(minBound , axis) + (getFloat4Component(maxBound , axis) - getFloat4Component(minBound , axis)) * (float(bestSplit) / float(numBuckets));
+
+    if (bestSplit == -1)
+    {
+        //cout << "no best split" << endl;
+
+        int mid = (start + end) / 2;
+        std::nth_element(indices.begin() + start, indices.begin() + mid, indices.begin() + end,
+            [&](int a, int b) { return getFloat4Component(centroids[a], axis) < getFloat4Component(centroids[b], axis); });
+        
+        splitPos = getFloat4Component(centroids[indices[mid]], axis);
+    }
+    else
+        splitPos = getFloat4Component(minBound , axis) + (getFloat4Component(maxBound , axis) - getFloat4Component(minBound , axis)) * (float(bestSplit) / float(numBuckets));
 }
 
 int buildBVH(vector<BVHnode>& nodes, vector<int>& indices, vector<float4>& centroids, 
@@ -149,13 +165,13 @@ int buildBVH(vector<BVHnode>& nodes, vector<int>& indices, vector<float4>& centr
     else if (zdiff > xdiff && zdiff > ydiff)
         axis = 2;
 
-    int bestSplit = 0;
+    //int bestSplit = 0;
     float splitPos;
     float cost;
-    SAH(indices, centroids, AABBmins, AABBmaxes, start, end, axis, minBound, maxBound, splitPos, cost);
+    SAH(indices, centroids, AABBmins, AABBmaxes, start, end, axis, minBound, maxBound, splitPos, cost, backup);
     
 
-    if (false)
+    /*if (false)
     {
         nodes[nodeIndex].first = start;
         nodes[nodeIndex].primCount = primCount;
@@ -163,17 +179,19 @@ int buildBVH(vector<BVHnode>& nodes, vector<int>& indices, vector<float4>& centr
         largestLeaf = max(primCount, largestLeaf);
         //cout << "force leaf Cost. Primcount: " << primCount << " cost:" << cost << endl;
         return nodeIndex;
-    }
+    }*/
         
 
     //splitPos = (getFloat4Component(maxBound , axis) + getFloat4Component(minBound , axis))/2.0f;
     //cout << "FIRST failed split at " << splitPos << " on the " << axis << " numbered axis" << endl; 
+    //int numLeft = 0;
+    int mid;
+    
     int numLeft = 0;
     for (int i = start; i < end; i++) {
         if (getFloat4Component(centroids[indices[i]], axis) < splitPos)
             numLeft++;
     }
-    int mid;
     //cout << "1numLeft: " << numLeft << endl;
     if (numLeft > 0 && numLeft < (primCount - 1))
         mid = partitionPrimitives(indices, centroids, start, end, axis, splitPos);
@@ -189,7 +207,7 @@ int buildBVH(vector<BVHnode>& nodes, vector<int>& indices, vector<float4>& centr
         splitPos = sum/primCount;
     }
     //cout << "SECOND failed split at " << splitPos << " on the " << axis << " numbered axis" << endl; 
-
+    
     numLeft = 0;
     for (int i = start; i < end; i++) {
         if (getFloat4Component(centroids[indices[i]], axis) < splitPos)
@@ -222,15 +240,27 @@ int buildBVH(vector<BVHnode>& nodes, vector<int>& indices, vector<float4>& centr
 
 int main ()
 {
+    auto start = std::chrono::high_resolution_clock::now();
     // image setup
     int w = 500;
     int h = 500;
     Image image = Image(w, h);
 
+    int sampleCount = 1000;
+    int maxLeafSize = 42;
+
+    cout << "Rendering at " << w << " by " << h << " pixels, with " << 
+        sampleCount << " samples per pixel, and a maximum leaf size of " <<
+        maxLeafSize << endl << endl;
+
     float4* out_colors;
     cudaMalloc(&out_colors, w * h * sizeof(float4));
 
-    vector<Vertex> vertices;
+    //vector<Vertex> vertices;
+    Vertices vertices;
+    vector<float4> points;
+    vector<float4> normals;
+    vector<float4> colors;
     vector<Triangle> mesh;
     vector<Triangle> lightsvec;
     vector<BVHnode> bvhvec;
@@ -238,17 +268,37 @@ int main ()
     vector<float4> centroids;
     vector<float4> minboxes;
     vector<float4> maxboxes;
+    //int pointCount = 0;
     
-    readObjSimple("scenedata/largebox.obj", vertices, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 1);
+    readObjSimple("scenedata/smallbox.obj", points, normals, colors, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 1);
     //cout << "scene data read. There are " << mesh.size() << " Triangles." << endl;
-    readObjSimple("scenedata/leftwall.obj", vertices, mesh, lightsvec, f4(0.2f,0.2f,0.7f), f4(), 1);
-    cout << "scene data read. There are " << mesh.size() << " Triangles." << endl;
-    readObjSimple("scenedata/rightwall.obj", vertices, mesh, lightsvec, f4(0.2f,0.2f,0.7f), f4(), 1);
-    readObjSimple("scenedata/tophalfmiku.obj", vertices, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), f4(), 1);
-    //readObjSimple("scenedata/box2.obj", vertices, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), f4(), 1);
-    //readObjSimple("scenedata/leftlight.obj", vertices, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 3.0f*f4(10.0f,1.0f,1.0f), 1);
+    readObjSimple("scenedata/leftwall.obj", points, normals, colors, mesh, lightsvec, f4(0.4f,0.4f,0.8f), f4(), 1);
+    readObjSimple("scenedata/rightwall.obj", points, normals, colors, mesh, lightsvec, f4(0.2f,0.6f,0.6f), f4(), 1);
+    readObjSimple("scenedata/tophalfmiku.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 1);
+    //readObjSimple("scenedata/character.obj", vertices, mesh, lightsvec, 1.0f*f4(0.9f,0.9f,0.9f), f4(), 1);
+    //readObjSimple("scenedata/smallbox.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.9f,0.9f), f4(), 1);
+    //readObjSimple("scenedata/swordbetter.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), f4(), 1);
+    //readObjSimple("scenedata/leftlight.obj", vertices, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 20.0f*f4(10.0f,1.0f,1.0f), 1);
     //readObjSimple("scenedata/rightlight.obj", vertices, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 3.0f*f4(3.0f,3.0f,10.0f), 1);
-    readObjSimple("scenedata/light.obj", vertices, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.45f*f4(7.0f,7.0f,13.0f), 1);
+    //readObjSimple("scenedata/reallysmalllight.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 30.0f*f4(7.0f,7.0f,3.0f), 1);
+    readObjSimple("scenedata/lightforward.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.8f*f4(7.0f,7.0f,3.0f), 1);
+
+        
+    Vertices* verts;
+    Triangle* scene;
+    Triangle* lights;
+
+    cudaMalloc(&verts,  sizeof(Vertices));
+    Vertices temp;
+
+    cudaMalloc(&temp.positions, sizeof(float4) * points.size());
+    cudaMalloc(&temp.normals, sizeof(float4) * normals.size());
+    cudaMalloc(&temp.colors,  sizeof(float4) * colors.size());
+
+    cudaMemcpy(temp.positions, points.data(), points.size() * sizeof(float4), cudaMemcpyHostToDevice);
+    cudaMemcpy(temp.normals, normals.data(), normals.size() * sizeof(float4), cudaMemcpyHostToDevice);
+    cudaMemcpy(temp.colors, colors.data(), colors.size() * sizeof(float4), cudaMemcpyHostToDevice);
+    cudaMemcpy(verts, &temp, sizeof(Vertices), cudaMemcpyHostToDevice);
 
     vector<int> indvec(mesh.size());
     for (int i = 0; i < mesh.size(); i++) indvec[i] = i;
@@ -259,40 +309,46 @@ int main ()
     }
     cout << "scene data read. There are " << mesh.size() << " Triangles." << endl;
 
+    auto afterRead = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed_seconds_afterRead = afterRead - start;
+    std::cout << "Scene construction took: " << elapsed_seconds_afterRead.count() << " seconds" << std::endl << endl;
+
+    vertices.positions = points.data();
+    vertices.normals   = normals.data();
+    vertices.colors    = colors.data();
     computeInfoForBVH(vertices, mesh, centroids, minboxes, maxboxes);
 
     cout << "BVH data computed" << endl;
 
     int failcount = 0;
     int backupCt = 0;
-    int startNode = buildBVH(bvhvec, indvec, centroids, minboxes, maxboxes, 0, mesh.size(), 3, failcount, backupCt);
+    int startNode = buildBVH(bvhvec, indvec, centroids, minboxes, maxboxes, 0, mesh.size(), maxLeafSize, failcount, backupCt);
 
     cout << "BVH built. Largest leaf is size: " << failcount << "." << " Backup was called "<< backupCt << " times." << endl;
     //printBVH(bvhvec, indvec);
     printBVHSummary(bvhvec);
-    cout << "scene data read. There are " << mesh.size() << " Triangles." << endl;
+
+    auto afterBVH = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed_seconds_afterBVH = afterBVH - afterRead;
+    std::cout << "BVH construction took: " << elapsed_seconds_afterBVH.count() << " seconds" << std::endl << endl;
     
     BVHnode* BVH;
     int* BVHindices;
-
-    Vertex* verts;
-    Triangle* scene;
-    Triangle* lights;
     
-    cudaMalloc(&verts, vertices.size() * sizeof(Vertex));
+    //cudaMalloc(&verts, vertices.size() * sizeof(Vertex));
     cudaMalloc(&scene, mesh.size() * sizeof(Triangle));
     cudaMalloc(&lights, lightsvec.size() * sizeof(Triangle));
     cudaMalloc(&BVH, bvhvec.size() * sizeof(BVHnode));
     cudaMalloc(&BVHindices, indvec.size() * sizeof(int));
 
-    cudaMemcpy(verts, vertices.data(), vertices.size() * sizeof(Vertex), cudaMemcpyHostToDevice);
+    //cudaMemcpy(verts, vertices.data(), vertices.size() * sizeof(Vertex), cudaMemcpyHostToDevice);
     cudaMemcpy(scene, mesh.data(), mesh.size() * sizeof(Triangle), cudaMemcpyHostToDevice);
     cudaMemcpy(lights, lightsvec.data(), lightsvec.size() * sizeof(Triangle), cudaMemcpyHostToDevice);
     cudaMemcpy(BVH, bvhvec.data(), bvhvec.size() * sizeof(BVHnode), cudaMemcpyHostToDevice);
     cudaMemcpy(BVHindices, indvec.data(), indvec.size() * sizeof(int), cudaMemcpyHostToDevice);
 
 
-    launch(6, BVH, BVHindices, verts, vertices.size(), scene, mesh.size(), lights, lightsvec.size(), 400, true, w, h, out_colors);
+    launch(6, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, true, w, h, out_colors);
 
     float4* host_colors = new float4[w * h];
     cudaMemcpy(host_colors, out_colors, w * h * sizeof(float4), cudaMemcpyDeviceToHost);
@@ -318,11 +374,25 @@ int main ()
     std::string filename = "render.bmp";
     image.saveImageBMP(filename);
 
+
+
+    auto end = std::chrono::high_resolution_clock::now();
+
+    std::chrono::duration<double> elapsed_seconds_render = end - afterBVH;
+    std::cout << "Render took: " << elapsed_seconds_render.count() << " seconds" << std::endl << endl;
+
+
+    std::chrono::duration<double> elapsed_seconds = end - start;
+    std::cout << "Total Elapsed time: " << elapsed_seconds.count() << " seconds" << std::endl;
+
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    std::cout << "Total Elapsed time (ms): " << elapsed_ms.count() << " milliseconds" << std::endl;
+
     
 }
 
 // Simple obj reading. no textures. Meant for flat shaded meshes.
-void readObjSimple(string filename, vector<Vertex>& vertices, vector<Triangle>& mesh, 
+void readObjSimple(string filename, vector<float4>& points, vector<float4>& normals, vector<float4>& colors, vector<Triangle>& mesh, 
     vector<Triangle>& lights, float4 c, float4 e, int materialID)
 {
     std::ifstream file(filename);
@@ -331,9 +401,8 @@ void readObjSimple(string filename, vector<Vertex>& vertices, vector<Triangle>& 
         std::cerr << "Error: Could not open OBJ file\n";
         return;
     }
-
-    vector<float4> points;
-    vector<float4> normals;
+    int startIndex = points.size();
+    int normalStartIndex = normals.size(); // <--- ADD THIS
 
     std::string line;
     while (std::getline(file, line)) {
@@ -343,6 +412,7 @@ void readObjSimple(string filename, vector<Vertex>& vertices, vector<Triangle>& 
         std::string prefix;
         
         iss >> prefix;
+        
 
         if (prefix == "v") {
             double x, y, z;
@@ -384,20 +454,24 @@ void readObjSimple(string filename, vector<Vertex>& vertices, vector<Triangle>& 
                 }
             }
             int n = vertexIndices.size();
-            int startIndex = vertices.size();
+            //int startIndex = points.size();
 
             // Push all vertices directly into the main vector
-            for (int i = 0; i < n; ++i) {
-                vertices.push_back(Vertex(points[vertexIndices[i]], c, normals[normalIndices[i]]));
-            }
+            //for (int i = 0; i < n; ++i) {
+            //    vertices.push_back(Vertex(points[vertexIndices[i]], c, normals[normalIndices[i]]));
+            //}
 
             // Triangulate the polygon as a fan from the first vertex
             for (int i = 1; i < n - 1; ++i) {
-                int idx0 = startIndex;      // first vertex of the fan
-                int idx1 = startIndex + i;  // current vertex
-                int idx2 = startIndex + i + 1; // next vertex
+                int idx0 = vertexIndices[0] + startIndex;
+                int idx1 = vertexIndices[i] + startIndex;
+                int idx2 = vertexIndices[i + 1] + startIndex;
 
-                Triangle tri(idx0, idx1, idx2, materialID, e);
+                int n_idx0 = normalIndices[0] + normalStartIndex;
+                int n_idx1 = normalIndices[i] + normalStartIndex;
+                int n_idx2 = normalIndices[i + 1] + normalStartIndex;
+
+                Triangle tri(idx0, idx1, idx2, n_idx0, n_idx1, n_idx2, materialID, e);
                 mesh.push_back(tri);
 
                 if (lengthSquared(e) > 0) {
@@ -405,6 +479,11 @@ void readObjSimple(string filename, vector<Vertex>& vertices, vector<Triangle>& 
                 }
             }
         }
+    }
+
+    for (int i = startIndex; i < points.size(); i++)
+    {
+        colors.push_back(c);
     }
 
     file.close();

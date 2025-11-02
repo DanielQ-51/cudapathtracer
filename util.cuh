@@ -9,82 +9,82 @@ using namespace std;
 __device__ __constant__ float EPSILON = 0.000001f;
 __device__ __constant__ float PI = 3.141592;
 
-inline __host__ __device__ float4 f4(float x, float y, float z, float w = 0.0f) {
+inline __host__ __device__ __forceinline__ float4 f4(float x, float y, float z, float w = 0.0f) {
     return make_float4(x, y, z, w);
 }
 
-inline __host__ __device__ float4 f4() {return make_float4(0,0,0,0);}
+inline __host__ __device__ __forceinline__ float4 f4() {return make_float4(0,0,0,0);}
 
-inline __host__ __device__ float4 f4(float a) {return make_float4(a,a,a,0);}
+inline __host__ __device__ __forceinline__ float4 f4(float a) {return make_float4(a,a,a,0);}
 
-inline __host__ __device__ float4 operator+(const float4 &a, const float4 &b) {
+inline __host__ __device__ __forceinline__ float4 operator+(const float4 &a, const float4 &b) {
     return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, 0.0f);
 }
 
-inline __host__ __device__ float4 operator-(const float4 &a, const float4 &b) {
+inline __host__ __device__ __forceinline__ float4 operator-(const float4 &a, const float4 &b) {
     return make_float4(a.x - b.x, a.y - b.y, a.z - b.z, 0.0f);
 }
 
-inline __host__ __device__ float4 operator*(const float4 &a, float t) {
+inline __host__ __device__ __forceinline__ float4 operator*(const float4 &a, float t) {
     return make_float4(a.x * t, a.y * t, a.z * t, 0.0f);
 }
 
-inline __host__ __device__ float4 operator*(float t, const float4 &a) {
+inline __host__ __device__ __forceinline__ float4 operator*(float t, const float4 &a) {
     return a * t;
 }
 
-inline __host__ __device__ float4 operator/(const float4 &a, float t) {
+inline __host__ __device__ __forceinline__ float4 operator/(const float4 &a, float t) {
     return make_float4(a.x / t, a.y / t, a.z / t, 0.0f);
 }
 
-inline __host__ __device__ float4& operator+=(float4 &a, const float4 &b) {
+inline __host__ __device__ __forceinline__ float4& operator+=(float4 &a, const float4 &b) {
     a.x += b.x; a.y += b.y; a.z += b.z;
     return a;
 }
 
-inline __host__ __device__ float4& operator*=(float4 &a, float t) {
+inline __host__ __device__ __forceinline__ float4& operator*=(float4 &a, float t) {
     a.x *= t; a.y *= t; a.z *= t;
     return a;
 }
 
-inline __host__ __device__ float4& operator*=(float4& a, const float4& b) {
+inline __host__ __device__  __forceinline__ float4& operator*=(float4& a, const float4& b) {
     a.x *= b.x; a.y *= b.y; a.z *= b.z;
     return a;
 }
 
-inline __host__ __device__ float4& operator/=(float4 &a, float t) {
+inline __host__ __device__ __forceinline__ float4& operator/=(float4 &a, float t) {
     a.x /= t; a.y /= t; a.z /= t;
     return a;
 }
 
-inline __host__ __device__ float4 operator*(const float4& a, const float4& b)
+inline __host__ __device__ __forceinline__ float4 operator*(const float4& a, const float4& b)
 {
     return make_float4(a.x*b.x, a.y*b.y, a.z*b.z, 0.0f);
 }
 
-inline __host__ __device__ float4 operator-(const float4& v)
+inline __host__ __device__ __forceinline__ float4 operator-(const float4& v)
 {
     return make_float4(-v.x, -v.y, -v.z, -v.w);
 }
 
-inline __host__ __device__ float dot(const float4 &a, const float4 &b) {
+inline __host__ __device__ __forceinline__ float dot(const float4 &a, const float4 &b) {
     return a.x*b.x + a.y*b.y + a.z*b.z;
 }
 
-inline __host__ __device__ float length(const float4 &v) {
+inline __host__ __device__ __forceinline__ float length(const float4 &v) {
     return sqrtf(dot(v, v));
 }
 
-inline __host__ __device__ float lengthSquared(const float4 &v) {
+inline __host__ __device__ __forceinline__ float lengthSquared(const float4 &v) {
     return dot(v, v);
 }
 
-inline __host__ __device__ float4 normalize(const float4 &v) {
+inline __host__ __device__ __forceinline__ float4 normalize(const float4 &v) {
     float invLen = rsqrtf(dot(v, v)); // 1 / sqrt(dot(v,v))
     return make_float4(v.x * invLen, v.y * invLen, v.z * invLen, 0.0f);
 }
 
-inline __host__ __device__ float4 cross3(const float4 &a, const float4 &b) {
+inline __host__ __device__ __forceinline__ float4 cross3(const float4 &a, const float4 &b) {
     return make_float4(
         a.y*b.z - a.z*b.y,
         a.z*b.x - a.x*b.z,
@@ -93,7 +93,7 @@ inline __host__ __device__ float4 cross3(const float4 &a, const float4 &b) {
     );
 }
 
-inline __host__ __device__ float clamp(float x, float minVal, float maxVal) {
+inline __host__ __device__ __forceinline__ float clamp(float x, float minVal, float maxVal) {
     if (x < minVal) return minVal;
     if (x > maxVal) return maxVal;
     return x;
@@ -106,7 +106,7 @@ inline __host__ std::ostream& operator<< (std::ostream& out, const float4& v )
     return out; 
 }
 
-inline __device__ void toWorld(const float4& wo_local, const float4& n, float4& wo_world)
+inline __device__ __forceinline__ void toWorld(const float4& wo_local, const float4& n, float4& wo_world)
 {
     float4 t, b;
     if (fabs(n.x) > fabs(n.z))
@@ -118,7 +118,7 @@ inline __device__ void toWorld(const float4& wo_local, const float4& n, float4& 
     wo_world = wo_local.x * t + wo_local.y * b + wo_local.z * n;
 }
 
-inline __device__ void toLocal(const float4& wo_world, const float4& n, float4& wo_local)
+inline __device__ __forceinline__ void toLocal(const float4& wo_world, const float4& n, float4& wo_local)
 {
     float4 t, b;
     if (fabs(n.x) > fabs(n.z))
@@ -148,7 +148,7 @@ inline __host__ float4 fmaxf4(const float4 &a, const float4 &b) {
     );
 }
 
-inline __host__ __device__ float getFloat4Component(const float4 &v, int i) {
+inline __host__ __device__ __forceinline__ float getFloat4Component(const float4 &v, int i) {
     switch(i) {
         case 0: return v.x;
         case 1: return v.y;
@@ -158,7 +158,7 @@ inline __host__ __device__ float getFloat4Component(const float4 &v, int i) {
     }
 }
 
-inline __host__ __device__ void setFloat4Component(float4 &v, int i, float value) {
+inline __host__ __device__ __forceinline__ void setFloat4Component(float4 &v, int i, float value) {
     switch(i) {
         case 0: v.x = value; break;
         case 1: v.y = value; break;
@@ -168,7 +168,10 @@ inline __host__ __device__ void setFloat4Component(float4 &v, int i, float value
     }
 }
 
-inline __host__ float surfaceArea(float4 min, float4 max)
+inline __host__ float surfaceArea(const float4& min, const float4& max)
 {
-    return 2.0f * ((max.x-min.x) * (max.y-min.y) +  (max.x-min.x) * (max.z-min.z) + (max.z-min.z) * (max.y-min.y));
+    float dx = max.x - min.x;
+    float dy = max.y - min.y;
+    float dz = max.z - min.z;
+    return 2.0f * (dx * dy + dx * dz + dy * dz);
 }

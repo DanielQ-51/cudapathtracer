@@ -3,6 +3,8 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include "util.cuh"
+#include <numeric>
+#include <algorithm>
 
 struct BVHnode
 {
@@ -55,54 +57,89 @@ inline void printBVH(const std::vector<BVHnode>& bvh, const std::vector<int>& in
 }
 
 inline void printBVHSummary(const std::vector<BVHnode>& bvh, int nodeIdx = 0, int level = 0,
-                            int& totalNodes = *(new int(0)), int& leafCount = *(new int(0)),
-                            int& maxDepth = *(new int(0)), int& largestLeaf = *(new int(0)))
+                            int& totalNodes = *(new int(0)),
+                            std::vector<int>* leafDepths = nullptr,
+                            std::vector<int>* leafSizes = nullptr)
 {
+    if (!leafDepths) leafDepths = new std::vector<int>();
+    if (!leafSizes) leafSizes = new std::vector<int>();
+
     if (nodeIdx >= bvh.size() || nodeIdx < 0) return;
 
     const BVHnode& node = bvh[nodeIdx];
     totalNodes++;
-    maxDepth = std::max(maxDepth, level);
 
-    if (node.left == -1 && node.right == -1)
+    if (node.left == -1 && node.right == -1) // leaf node
     {
-        leafCount++;
-        largestLeaf = std::max(largestLeaf, node.primCount);
+        leafDepths->push_back(level);
+        leafSizes->push_back(node.primCount);
     }
 
     if (node.left != -1)
-        printBVHSummary(bvh, node.left, level + 1, totalNodes, leafCount, maxDepth, largestLeaf);
+        printBVHSummary(bvh, node.left, level + 1, totalNodes, leafDepths, leafSizes);
     if (node.right != -1)
-        printBVHSummary(bvh, node.right, level + 1, totalNodes, leafCount, maxDepth, largestLeaf);
+        printBVHSummary(bvh, node.right, level + 1, totalNodes, leafDepths, leafSizes);
 
-    // Only print once at the top level
+    // Only print at the top level
     if (level == 0)
     {
+        int leafCount = leafDepths->size();
+        int maxDepth = leafCount > 0 ? *std::max_element(leafDepths->begin(), leafDepths->end()) : 0;
+        int largestLeaf = leafCount > 0 ? *std::max_element(leafSizes->begin(), leafSizes->end()) : 0;
+
+        auto mean = [](const std::vector<int>& v) {
+            return v.empty() ? 0.0 : static_cast<double>(std::accumulate(v.begin(), v.end(), 0LL)) / v.size();
+        };
+
+        auto stddev = [mean](const std::vector<int>& v) {
+            if (v.empty()) return 0.0;
+            double m = mean(v);
+            double sumSq = 0.0;
+            for (int x : v) sumSq += (x - m) * (x - m);
+            return std::sqrt(sumSq / v.size());
+        };
+
+        auto median = [](std::vector<int> v) -> double {
+            if (v.empty()) return 0.0;
+            std::sort(v.begin(), v.end());
+            size_t n = v.size();
+            return n % 2 == 0 ? 0.5 * (v[n/2 - 1] + v[n/2]) : v[n/2];
+        };
+
         std::cout << "================= BVH Summary =================\n";
-        std::cout << "Total nodes:      " << totalNodes << "\n";
-        std::cout << "Leaf nodes:       " << leafCount << "\n";
-        std::cout << "Max depth:        " << maxDepth << "\n";
-        std::cout << "Largest leaf:     " << largestLeaf << " primitives\n";
-        std::cout << "Internal nodes:   " << (totalNodes - leafCount) << "\n";
+        std::cout << "Total nodes:       " << totalNodes << "\n";
+        std::cout << "Leaf nodes:        " << leafCount << "\n";
+        std::cout << "Max leaf depth:    " << maxDepth << "\n";
+        std::cout << "Average leaf depth:" << mean(*leafDepths) << "\n";
+        std::cout << "Median leaf depth: " << median(*leafDepths) << "\n";
+        std::cout << "Leaf depth stddev: " << stddev(*leafDepths) << "\n";
+        std::cout << "Largest leaf:      " << largestLeaf << " primitives\n";
+        std::cout << "Average leaf size: " << mean(*leafSizes) << " primitives\n";
+        std::cout << "Median leaf size:  " << median(*leafSizes) << " primitives\n";
+        std::cout << "Leaf size stddev:  " << stddev(*leafSizes) << "\n";
+        std::cout << "Internal nodes:    " << (totalNodes - leafCount) << "\n";
+
+        // Print top 10 largest leaf sizes
+        std::vector<int> sortedLeafSizes = *leafSizes;
+        std::sort(sortedLeafSizes.begin(), sortedLeafSizes.end(), std::greater<int>());
+        std::cout << "Top 10 largest leaf sizes: ";
+        for (size_t i = 0; i < std::min<size_t>(10, sortedLeafSizes.size()); ++i)
+            std::cout << sortedLeafSizes[i] << " ";
+        std::cout << "\n";
+
         std::cout << "===============================================\n";
+
+        delete leafDepths;
+        delete leafSizes;
         delete &totalNodes;
-        delete &leafCount;
-        delete &maxDepth;
-        delete &largestLeaf;
     }
 }
 
-
-
-struct Vertex 
+struct Vertices
 {
-    float4 position;
-    float4 normal;
-    float4 color;
-    //float2 uv;
-
-    __host__ __device__ Vertex (const float4& p,const float4& c, const float4& n) 
-        : position(p), normal(n), color(c) {}
+    float4* positions;
+    float4* normals;
+    float4* colors;
 };
 
 struct Triangle
@@ -110,14 +147,15 @@ struct Triangle
     int aInd;
     int bInd;
     int cInd;
-    int normInd; // THIS ISNT BEING USED
+    int naInd, nbInd, ncInd; // Normal indices
+    //int normInd; // THIS ISNT BEING USED
     int materialID;
     float4 emission;
 
     __host__ __device__ Triangle() {}
 
-    __host__ Triangle(int a, int b, int c, int matID, float4 em)
-        : aInd(a), bInd(b), cInd(c), materialID(matID), emission(em) {}
+    __host__ __device__ Triangle(int a, int b, int c, int na, int nb, int nc, int mat, float4 e)
+        : aInd(a), bInd(b), cInd(c), naInd(na), nbInd(nb), ncInd(nc), materialID(mat), emission(e) {}
 };
 
 struct Ray
@@ -145,4 +183,61 @@ struct Intersection
     bool valid;
 
     __device__ Intersection() {valid = false;};
+};
+
+enum MaterialType {
+    MAT_DIFFUSE = 0,
+    MAT_METAL = 1,
+    MAT_DIELECTRIC = 2,
+    MAT_EMISSIVE = 3
+};
+
+struct Material
+{
+    int type;
+    
+    float4 albedo;
+    float roughness;
+
+    float4 eta;
+    float4 k;
+    float ior;
+
+    float metallic;
+    float specular;
+    float transmission; 
+
+    __host__ __device__ Material()
+        : type(MAT_DIFFUSE), albedo(f4(0.8f)),
+          roughness(0.5f), eta(f4(0)), k(f4(0)),
+          ior(1.5f), metallic(0.0f), specular(1.0f), transmission(0.0f) {}
+
+    __host__ __device__ static Material Diffuse(const float4& color) {
+        Material m;
+        m.type = MAT_DIFFUSE;
+        m.albedo = color;
+        m.roughness = 1.0f;
+        return m;
+    }
+
+    __host__ __device__ static Material Metal(const float4& n, const float4& k, float roughness = 0.1f) {
+        Material m;
+        m.type = MAT_METAL;
+        m.eta = n;
+        m.k = k;
+        m.roughness = roughness;
+        m.albedo = f4(1.0f);  // metals usually reflect via Fresnel, not albedo tint
+        m.metallic = 1.0f;
+        return m;
+    }
+
+    __host__ __device__ static Material Dielectric(float ior = 1.5f, float roughness = 0.0f) {
+        Material m;
+        m.type = MAT_DIELECTRIC;
+        m.ior = ior;
+        m.roughness = roughness;
+        m.albedo = f4(1.0f);
+        m.transmission = 1.0f;
+        return m;
+    }
 };

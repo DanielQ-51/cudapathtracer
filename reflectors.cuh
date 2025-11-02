@@ -10,6 +10,12 @@ __device__ void cosine_f(const float4& baseColor, float4& newColor)
     newColor = baseColor/PI;
 }
 
+__device__ void cosine_pdf(const float4& wo_local, float& pdf)
+{
+    pdf = fmaxf(wo_local.z, EPSILON)/PI;
+}
+
+
 __device__ void cosine_sample_f(curandState& localState, float4& wo, float& pdf)
 {
     float u1 = curand_uniform(&localState);
@@ -23,5 +29,35 @@ __device__ void cosine_sample_f(curandState& localState, float4& wo, float& pdf)
     float z = sqrt(1.0f - u1); 
 
     wo = f4(x,y,z);
-    pdf = fmaxf(z, EPSILON)/PI;
+    cosine_pdf(wo, pdf);
+}
+
+__device__ void f(Material* materials, int materialID, const float4& wi)
+{
+
+}
+
+__device__ void sample_f(Material* materials, int materialID, const float4& wi, float4& wo)
+{
+    
+}
+
+__device__ void pdf(Material* materials, int materialID, const float4& wi, const float4& wo)
+{
+
+}
+
+__device__ void f(Material* materials, int materialID, const float4& wi)
+{
+
+}
+
+__device__ void sample_f(Material* materials, int materialID, const float4& wi, float4& wo)
+{
+    Material mat = materials[materialID-1];
+}
+
+__device__ void pdf(Material* materials, int materialID, const float4& wi, const float4& wo)
+{
+
 }
