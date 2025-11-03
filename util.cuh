@@ -62,6 +62,11 @@ inline __host__ __device__ __forceinline__ float4 operator*(const float4& a, con
     return make_float4(a.x*b.x, a.y*b.y, a.z*b.z, 0.0f);
 }
 
+inline __host__ __device__ __forceinline__ float4 operator/(const float4& a, const float4& b)
+{
+    return make_float4(a.x/b.x, a.y/b.y, a.z/b.z, 0.0f);
+}
+
 inline __host__ __device__ __forceinline__ float4 operator-(const float4& v)
 {
     return make_float4(-v.x, -v.y, -v.z, -v.w);
@@ -131,7 +136,7 @@ inline __device__ __forceinline__ void toLocal(const float4& wo_world, const flo
 }
 
 // Component-wise min of two float4s
-inline __host__ float4 fminf4(const float4 &a, const float4 &b) {
+inline __host__ __device__ __forceinline__ float4 fminf4(const float4 &a, const float4 &b) {
     return f4(
         fminf(a.x, b.x),
         fminf(a.y, b.y),
@@ -140,7 +145,7 @@ inline __host__ float4 fminf4(const float4 &a, const float4 &b) {
 }
 
 // Component-wise max of two float4s
-inline __host__ float4 fmaxf4(const float4 &a, const float4 &b) {
+inline __host__ __device__ __forceinline__ float4 fmaxf4(const float4 &a, const float4 &b) {
     return f4(
         fmaxf(a.x, b.x),
         fmaxf(a.y, b.y),
@@ -174,4 +179,8 @@ inline __host__ float surfaceArea(const float4& min, const float4& max)
     float dy = max.y - min.y;
     float dz = max.z - min.z;
     return 2.0f * (dx * dy + dx * dz + dy * dz);
+}
+
+__device__ __forceinline__ float4 sqrtf4(const float4& v) {
+    return make_float4(sqrtf(v.x), sqrtf(v.y), sqrtf(v.z), 0.0f);
 }

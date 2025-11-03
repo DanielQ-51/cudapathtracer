@@ -242,12 +242,12 @@ int main ()
 {
     auto start = std::chrono::high_resolution_clock::now();
     // image setup
-    int w = 500;
-    int h = 500;
+    int w = 1000;
+    int h = 1000;
     Image image = Image(w, h);
 
     int sampleCount = 1000;
-    int maxLeafSize = 42;
+    int maxLeafSize = 40;
 
     cout << "Rendering at " << w << " by " << h << " pixels, with " << 
         sampleCount << " samples per pixel, and a maximum leaf size of " <<
@@ -256,7 +256,6 @@ int main ()
     float4* out_colors;
     cudaMalloc(&out_colors, w * h * sizeof(float4));
 
-    //vector<Vertex> vertices;
     Vertices vertices;
     vector<float4> points;
     vector<float4> normals;
@@ -268,20 +267,42 @@ int main ()
     vector<float4> centroids;
     vector<float4> minboxes;
     vector<float4> maxboxes;
-    //int pointCount = 0;
+
+    vector<Material> mats;
+
+    Material lambertBlue = Material::Diffuse(f4(0.4f,0.4f,0.8f));
+    Material lambertWhite = Material::Diffuse(f4(0.9f,0.9f,0.9f));
+    Material lambertGreen = Material::Diffuse(f4(0.2f,0.6f,0.6f));
+
+    float4 eta_gold = f4(0.17f, 0.35f, 1.5f);  // real part of refractive index
+    float4 k_gold   = f4(3.1f, 2.7f, 1.9f);   // imaginary part, absorption
+    float roughness_polished = 0.1f;  
+
+    Material ironPolished = Material::Metal(eta_gold, eta_gold, roughness_polished);
+
+    mats.push_back(lambertBlue); // index 0
+    mats.push_back(lambertWhite); // index 1
+    mats.push_back(lambertGreen); // index 2
+    mats.push_back(ironPolished); // index 3
+
+    Material* mats_d;
+
+    cudaMalloc(&mats_d, mats.size() * sizeof(Material));
+    cudaMemcpy(mats_d, mats.data(), mats.size() * sizeof(Material), cudaMemcpyHostToDevice);
+    
     
     readObjSimple("scenedata/smallbox.obj", points, normals, colors, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 1);
     //cout << "scene data read. There are " << mesh.size() << " Triangles." << endl;
-    readObjSimple("scenedata/leftwall.obj", points, normals, colors, mesh, lightsvec, f4(0.4f,0.4f,0.8f), f4(), 1);
-    readObjSimple("scenedata/rightwall.obj", points, normals, colors, mesh, lightsvec, f4(0.2f,0.6f,0.6f), f4(), 1);
-    readObjSimple("scenedata/tophalfmiku.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 1);
+    readObjSimple("scenedata/leftwall.obj", points, normals, colors, mesh, lightsvec, f4(0.4f,0.4f,0.8f), f4(), 0);
+    readObjSimple("scenedata/rightwall.obj", points, normals, colors, mesh, lightsvec, f4(0.2f,0.6f,0.6f), f4(), 2);
+    readObjSimple("scenedata/tophalfmiku.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 3);
     //readObjSimple("scenedata/character.obj", vertices, mesh, lightsvec, 1.0f*f4(0.9f,0.9f,0.9f), f4(), 1);
     //readObjSimple("scenedata/smallbox.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.9f,0.9f), f4(), 1);
     //readObjSimple("scenedata/swordbetter.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), f4(), 1);
     //readObjSimple("scenedata/leftlight.obj", vertices, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 20.0f*f4(10.0f,1.0f,1.0f), 1);
     //readObjSimple("scenedata/rightlight.obj", vertices, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 3.0f*f4(3.0f,3.0f,10.0f), 1);
     //readObjSimple("scenedata/reallysmalllight.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 30.0f*f4(7.0f,7.0f,3.0f), 1);
-    readObjSimple("scenedata/lightforward.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.8f*f4(7.0f,7.0f,3.0f), 1);
+    readObjSimple("scenedata/lightforward.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 1.600f*f4(7.0f,7.0f,3.0f), 1);
 
         
     Vertices* verts;
@@ -348,7 +369,7 @@ int main ()
     cudaMemcpy(BVHindices, indvec.data(), indvec.size() * sizeof(int), cudaMemcpyHostToDevice);
 
 
-    launch(6, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, true, w, h, out_colors);
+    launch(6, mats_d ,BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, true, w, h, out_colors);
 
     float4* host_colors = new float4[w * h];
     cudaMemcpy(host_colors, out_colors, w * h * sizeof(float4), cudaMemcpyDeviceToHost);

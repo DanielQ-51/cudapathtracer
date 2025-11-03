@@ -242,9 +242,9 @@ __global__ void initRNG(curandState* states, int width, int height, unsigned lon
     curand_init(seed, idx, 0, &states[idx]);  
 }
 
-__device__ void nextEventEstimation(curandState& localState, BVHnode* BVH, int* BVHindices, const float4& wo, Vertices* vertices, int vertNum,
-    Triangle* scene, int triNum, Triangle* lights, int lightNum, int materialID,const Intersection& intersect, 
-    float& light_pdf, float4& contribution, Triangle* light = nullptr, const Intersection* newIntersect = nullptr)
+__device__ void nextEventEstimation(curandState& localState, Material* materials, BVHnode* BVH, int* BVHindices, Vertices* vertices, int vertNum,
+    Triangle* scene, int triNum, Triangle* lights, int lightNum, int materialID, const Intersection& intersect, const float4& wo, 
+    float& light_pdf, float4& contribution, float4& surfaceToLight, Triangle* light = nullptr, const Intersection* newIntersect = nullptr)
 {
     contribution = f4(0.0f,0.0f,0.0f);
     Triangle l;
@@ -286,7 +286,7 @@ __device__ void nextEventEstimation(curandState& localState, BVHnode* BVH, int* 
     
 
 
-    float4 surfaceToLight = p-intersect.point;
+    surfaceToLight = p-intersect.point;
     
     
     float4 wi = normalize(surfaceToLight);
@@ -315,14 +315,19 @@ __device__ void nextEventEstimation(curandState& localState, BVHnode* BVH, int* 
         light_pdf = distanceSQR / (cosThetaLight * lightNum * area);
         float4 Le = l.emission;
         float4 f_val;
-        cosine_f(intersect.color, f_val);
+        float4 wi_local;
+        toLocal(wi, intersect.normal, wi_local);
+
+        // wo is the incoming direction (passed to this function)
+        // wi_local is the computed outgoing direction to the light
+        f_eval(localState, materials, materialID, wo, wi_local, f_val);
 
         contribution = f_val * Le * cosThetaSurface / light_pdf;
     }
     else {}
 }
 
-__global__ void Li (curandState* rngStates, BVHnode* BVH, int* BVHindices, int maxDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
+__global__ void Li (curandState* rngStates, Material* materials, BVHnode* BVH, int* BVHindices, int maxDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
     Triangle* lights, int lightNum, int numSample, bool useMIS, int w, int h, float4* colors)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -334,29 +339,6 @@ __global__ void Li (curandState* rngStates, BVHnode* BVH, int* BVHindices, int m
     float4 colorSum = f4();
 
     curandState localState = rngStates[pixelIdx];
-    //float du = curand_uniform(&localState);
-    //float dv = curand_uniform(&localState);
-
-    //float4 a = f4();
-    //float4 cameraOrigin = f4();
-    //Ray r = Ray();
-    //float4 beta = f4();
-    //float4 Li = f4();
-    //int materialID = -1;
-    //int depth = -1;
-    //float4 f_val = f4();
-    //float4 wo_local = f4();
-    //float pdf = EPSILON;
-    //float4 wo_world;
-    //float4 wi_world = f4();
-    //float light_pdf = EPSILON;
-    //float4 nee = f4();
-    //Intersection intersect = Intersection();
-    //Intersection previousintersect = Intersection();
-    //float neeWeight = EPSILON; // reused for all MIS interactions
-    //float bsdfWeight = EPSILON; // reused for all MIS interactions
-    //float p = EPSILON;// for russian roulette
-    //float luminance = EPSILON; // for russian roulette
 
     for (int currSample = 0; currSample < numSample; currSample++)
     {   
@@ -365,6 +347,7 @@ __global__ void Li (curandState* rngStates, BVHnode* BVH, int* BVHindices, int m
         float4 Li = f4();
         float4 wi_local = f4();
         float4 wo_local = f4();
+        float4 wi_world = f4();
         Intersection previousintersect = Intersection();
 
         //float du = curand_uniform(&localState);
@@ -397,13 +380,16 @@ __global__ void Li (curandState* rngStates, BVHnode* BVH, int* BVHindices, int m
                 {
                     Li += beta * intersect.emission;
                 }
-                else if (useMIS)
+                else if (useMIS) // found light using BSDF sampling, weigh against NEE
                 {
                     float4 nee;
                     float light_pdf = EPSILON;
-                    nextEventEstimation(localState, BVH, BVHindices, wi_local, vertices, vertNum, scene, 
-                        triNum, lights, lightNum, materialID, previousintersect, light_pdf, 
-                        nee, &intersect.tri, &previousintersect);
+                    float4 dummy;
+
+                    // to calculate the light sampling pdf (a little inefficient)
+                    nextEventEstimation(localState, materials, BVH, BVHindices, vertices, vertNum, scene, 
+                        triNum, lights, lightNum, materialID, previousintersect, wi_local, light_pdf, 
+                        nee, dummy, &intersect.tri, &previousintersect); // wi_local is used from the previous bounce
                     
                     if (light_pdf > EPSILON)
                     {
@@ -414,35 +400,54 @@ __global__ void Li (curandState* rngStates, BVHnode* BVH, int* BVHindices, int m
                 }
             }
 
-            toLocal(-r.direction, intersect.normal, wi_local);
-            //wi_world = normalize(-r.direction);
+            toLocal(r.direction, intersect.normal, wi_local);
+            wi_world = normalize(r.direction);
 
-            if (useMIS && lengthSquared(intersect.emission) < EPSILON)
+            if (useMIS && lengthSquared(intersect.emission) < EPSILON) // using nee mainly, weigh against BSDF pdf
             {
                 float4 nee;
                 float light_pdf = EPSILON;
-                nextEventEstimation(localState, BVH, BVHindices, wi_local, vertices, vertNum, scene, 
-                triNum, lights, lightNum, materialID, intersect, light_pdf, nee);
+                // we get wo_local, the direction from surface to sampled light, to evaluate the bsdf pdf, 
+                // and store it in wo_local
+                nextEventEstimation(localState, materials, BVH, BVHindices, vertices, vertNum, scene, 
+                triNum, lights, lightNum, materialID, intersect, wi_local, light_pdf, nee, wo_local);
 
                 if (light_pdf > EPSILON)
                 {
-                    float neeWeight = light_pdf * light_pdf / (fmaxf(wo_local.z, EPSILON)/PI * fmaxf(wo_local.z, EPSILON)/PI + light_pdf * light_pdf);
+                    // to calculate the bsdf pdf
+                    pdf_eval(materials, materialID, wi_local, wo_local, pdf); // stores the bsdf pdf val in pdf
+                    float neeWeight = light_pdf * light_pdf / (pdf * pdf + light_pdf * light_pdf);
 
                     Li += beta * nee * neeWeight;
                 }
                 
             }
             float4 f_val = f4();
-            cosine_f(intersect.color, f_val);
-            cosine_sample_f(localState, wo_local, pdf);
+            sample_f_eval(localState, materials, materialID, wi_local, wo_local, f_val, pdf);
 
             float4 wo_world= f4();
             toWorld(wo_local, intersect.normal, wo_world);
+
+            if (materials[materialID].type == MAT_METAL)
+            {
+                //printf("metal pdf: %f \n", pdf);
+                //printf("metal fval: %f %f %f\n\n", f_val.x, f_val.y, f_val.z);
+            }
+
+            pdf = fmaxf(pdf, 0.01);
             
-            if (pdf < EPSILON) 
-            break;
+            /*
+            if (pdf < 0.0f) 
+            {
+                Li = f4(1.0f, 0.0f, 0.0f);
+                break;
+            }
+            */
+            
+            
 
             beta *= (f_val * fabs(wo_local.z) / pdf);
+            beta = fminf4(beta, f4(1000.0f));
 
             if (depth > maxDepth)
             {
@@ -465,7 +470,7 @@ __global__ void Li (curandState* rngStates, BVHnode* BVH, int* BVHindices, int m
     rngStates[pixelIdx] = localState;
 }
 
-__host__ void launch(int maxDepth, BVHnode* BVH, int* BVHindices, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
+__host__ void launch(int maxDepth, Material* materials, BVHnode* BVH, int* BVHindices, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
     Triangle* lights, int lightNum, int numSample, bool useMIS, int w, int h, float4* colors)
 {
     dim3 blockSize(16, 16);  
@@ -477,7 +482,7 @@ __host__ void launch(int maxDepth, BVHnode* BVH, int* BVHindices, Vertices* vert
     initRNG<<<gridSize, blockSize>>>(d_rngStates, w, h, seed);
     cudaDeviceSynchronize();
 
-    Li<<<gridSize, blockSize>>>(d_rngStates, BVH, BVHindices, maxDepth, vertices, vertNum, scene, triNum, 
+    Li<<<gridSize, blockSize>>>(d_rngStates, materials, BVH, BVHindices, maxDepth, vertices, vertNum, scene, triNum, 
         lights, lightNum, numSample, useMIS, w, h, colors);
 
     cudaDeviceSynchronize();
