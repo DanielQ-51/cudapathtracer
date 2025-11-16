@@ -179,8 +179,12 @@ struct Intersection
     float4 emission;
     //Ray ray;
     Triangle tri;
+    int triIDX;
     int materialID;
     bool valid;
+    bool backface;
+
+    float dist;
 
     __device__ Intersection() {valid = false;};
 };
@@ -188,8 +192,8 @@ struct Intersection
 enum MaterialType {
     MAT_DIFFUSE = 0,
     MAT_METAL = 1,
-    MAT_DIELECTRIC = 2,
-    MAT_EMISSIVE = 3
+    MAT_SMOOTHDIELECTRIC = 2,
+    MAT_MICROFACETDIELECTRIC = 3
 };
 
 struct Material
@@ -207,6 +211,13 @@ struct Material
     float specular;
     float transmission; 
 
+    bool isSpecular;
+    bool transmissive; // for mediums tack calculations
+
+    float4 absorption;
+
+    int priority; // dielectric priority, for nested dielectrics/medium stack
+
     __host__ __device__ Material()
         : type(MAT_DIFFUSE), albedo(f4(0.8f)),
           roughness(0.5f), eta(f4(0)), k(f4(0)),
@@ -217,6 +228,8 @@ struct Material
         m.type = MAT_DIFFUSE;
         m.albedo = color;
         m.roughness = 1.0f;
+        m.transmissive = false;
+        m.absorption = f4();
         return m;
     }
 
@@ -228,16 +241,33 @@ struct Material
         m.roughness = roughness;
         m.albedo = f4(1.0f);  // metals usually reflect via Fresnel, not albedo tint
         m.metallic = 1.0f;
+        m.transmissive = false;
+        m.absorption = f4();
         return m;
     }
 
-    __host__ __device__ static Material Dielectric(float ior = 1.5f, float roughness = 0.0f) {
+    __host__ __device__ static Material SmoothDielectric(float ior = 1.5f, const float4& k = f4(), int pri = 0) {
         Material m;
-        m.type = MAT_DIELECTRIC;
+        m.type = MAT_SMOOTHDIELECTRIC;
         m.ior = ior;
+        m.albedo = f4(1.0f);
+
+        m.priority = pri;
+        m.isSpecular = true;
+        m.transmissive = true;
+
+        m.absorption = k;
+        return m;
+    }
+
+    __host__ __device__ static Material MicrofacetDielectric(float ior = 1.5f, float roughness = 0.0f, const float4& k = f4()) {
+        Material m;
+        m.type = MAT_MICROFACETDIELECTRIC;
+        m.ior = ior;
+        m.k = k;
         m.roughness = roughness;
         m.albedo = f4(1.0f);
-        m.transmission = 1.0f;
+
         return m;
     }
 };

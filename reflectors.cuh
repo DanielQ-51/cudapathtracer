@@ -59,12 +59,6 @@ __device__ float G1_GGX(const float4& v, const float4& h, float alpha)
         return 1.0f;
 }
 
-/*
-__device__ float G_Smith(float nDotWi, float nDotWo, float alpha) 
-{
-    return G1_Smith(nDotWi, alpha) * G1_Smith(nDotWo, alpha);
-}*/
-
 __device__ float G_Smith(const float4& wi, const float4& wo, const float4& h, float alpha)
 {
     return G1_GGX(wi, h, alpha) * G1_GGX(wo, h, alpha);
@@ -87,11 +81,11 @@ __device__ float4 Fresnel_Conductor(float cosTheta, const float4& eta, const flo
     float4 t3 = cosTheta2 * a2plusb2 + sinTheta2 * sinTheta2;
     float4 t4 = t2 * sinTheta2;
     float4 Rp = (t3 - t4) / (t3 + t4);
-    return (Rs + Rp) * 0.5f;
-    //return (t1 - t2) / (t1 + t2);
+    //return (Rs + Rp) * 0.5f;
+    return (t1 - t2) / (t1 + t2);
 }
 
-__device__ void microfacet_f(const float4& eta, const float4& k, float roughness, const float4& wi, const float4& wo, float4& f_val)
+__device__ void microfacet_metal_f(const float4& eta, const float4& k, float roughness, const float4& wi, const float4& wo, float4& f_val)
 {
     if (wi.z <= 0.0f || wo.z <= 0.0f) {
         f_val = f4(0.0f);
@@ -114,7 +108,7 @@ __device__ void microfacet_f(const float4& eta, const float4& k, float roughness
     f_val = (D * G * f) / fmaxf(4.0f * nDotWi * nDotWo, EPSILON);
 }
 
-__device__ void microfacet_pdf(const float& roughness, const float4& wi, const float4& wo, float& pdf)
+__device__ void microfacet_metal_pdf(const float& roughness, const float4& wi, const float4& wo, float& pdf)
 {
 
     float4 h = normalize(wi + wo);
@@ -124,7 +118,7 @@ __device__ void microfacet_pdf(const float& roughness, const float4& wi, const f
     pdf = (D * h.z) / (denom);
 }
 
-__device__ void microfacet_sample_f(curandState& localState, const float4& eta, const float4& k, float roughness, const float4& wi, 
+__device__ void microfacet_metal_sample_f(curandState& localState, const float4& eta, const float4& k, float roughness, const float4& wi, 
     float4& wo, float4& f_val, float& pdf)
 {
     float u1 = curand_uniform(&localState);
@@ -142,17 +136,171 @@ __device__ void microfacet_sample_f(curandState& localState, const float4& eta, 
     wo = 2.0f * dot(wi, h_local) * h_local - wi;
     if (wo.z <= 0.0f) wo.z = -wo.z;
     
-    microfacet_f(eta, k, roughness, wi, wo, f_val); // f_val set
-    microfacet_pdf(roughness, wi, wo, pdf); // pdf set
+    microfacet_metal_f(eta, k, roughness, wi, wo, f_val); // f_val set
+    microfacet_metal_pdf(roughness, wi, wo, pdf); // pdf set
 }
 
-__device__ float4 Fresnel_Schlick(float cosTheta, const float4& F0) 
+// fabs is used here for costheta
+__device__ inline float schlick_fresnel(float cosTheta, float etaI, float etaT)
 {
-    return F0 + (f4(1.0f) - F0) * powf(1.0f - cosTheta, 5.0f);
+    float R0 = (etaI - etaT) / (etaI + etaT);
+    R0 = R0 * R0;
+    return R0 + (1.0f - R0) * powf(1.0f - fabsf(cosTheta), 5.0f);
 }
 
+// -----------------------------------------------------------------------------
+// EVAL (given wi, wo, etaI, etaT, and reflect boolean)
+// -----------------------------------------------------------------------------
+__device__ void smooth_dielectric_f(
+    const float4& wi, const float4& wo,
+    float etaI, float etaT, bool reflect, bool TIR,
+    float4& f_val)
+{
+    printf("never called");
+    float cosThetaI = wi.z;
+    float cosThetaO = wo.z;
+    float F = schlick_fresnel(cosThetaI, etaI, etaT);
+
+    if (reflect) {
+        // Perfect specular reflection: wo.z = wi.z
+        // BSDF value for delta reflection (handled as Dirac delta)
+        if (TIR)
+            f_val = f4(1.0f / fabsf(cosThetaO));
+        else
+            f_val = f4(F / fabsf(cosThetaO));
+    } else {
+        // Perfect specular refraction
+        float eta = etaI / etaT;
+        f_val = f4((1.0f - F) * eta * eta / fabsf(cosThetaO));
+    }
+}
+
+// -----------------------------------------------------------------------------
+// SAMPLE_F (importance sample the reflection/refract direction)
+// -----------------------------------------------------------------------------
+__device__ void smooth_dielectric_sample_f(curandState& localState,
+    const float4& wi, float etaI, float etaT, float4& wo, float4& f_val, float& pdf)
+{
+    float cosThetaI = wi.z; // always pos
+
+    float eta = etaI / etaT;
+    float cosThetaT2 = 1.0f - eta * eta * (1.0f - cosThetaI * cosThetaI);
+
+    float F;
+    if (cosThetaT2 < 0.0f)
+    {
+        wo = f4(-wi.x, -wi.y, wi.z);
+        float cosThetaO = wo.z;
+        f_val = f4(1.0f / fabsf(cosThetaO));
+        pdf = 1.0f;
+        return;
+    }
+    
+    F = schlick_fresnel(cosThetaI, etaI, etaT);
+
+    if (curand_uniform(&localState) < F) {
+        wo = f4(-wi.x, -wi.y, wi.z);
+        float cosThetaO = wo.z;
+        pdf = F;
+        f_val = f4(F / fabsf(cosThetaO));
+    } 
+    else {
+        float eta = etaI / etaT;
+
+        wo = f4(
+            -eta * wi.x, 
+            -eta * wi.y, 
+            - (sqrtf(cosThetaT2))
+        );
+
+        float cosThetaO = wo.z;
+        // BSDF term
+        f_val = f4((1.0f - F) * eta * eta / fabsf(cosThetaO));
+        pdf = 1.0f - F;
+    }
+    
+}
+
+// -----------------------------------------------------------------------------
+// PDF (for MIS weighting)
+// -----------------------------------------------------------------------------
+__device__ void smooth_dielectric_pdf(
+    const float4& wi, const float4& wo,
+    float etaI, float etaT, bool reflect, bool TIR,
+    float& pdf)
+{
+    printf("never called");
+    float cosThetaI = wi.z;
+    float F = schlick_fresnel(cosThetaI, etaI, etaT);
+
+    if (reflect) {
+        if (TIR)
+            pdf = 1.0f;
+        else
+            pdf = F;
+    } else {
+        pdf = 1.0f - F;
+    }
+}
+// wi is always point away from the surface on the positive z hemisphere. since we flipped the intersect normal if it was a backface before converting to local
+__device__ void dumb_smooth_dielectric_sample_f(curandState& localState,
+    const float4& wi, float etaSurface, bool backface, float4& wo, float4& f_val, float& pdf)
+{
+    float etaI, etaT;
+    if (backface)
+    {
+        etaI = etaSurface;
+        etaT = 1.0f;
+    }
+    else
+    {
+        etaI = 1.0f;
+        etaT = etaSurface;
+    }
+
+    float cosThetaI = wi.z; // always pos
+
+    float eta = etaI / etaT;
+    float cosThetaT2 = 1.0f - eta * eta * (1.0f - cosThetaI * cosThetaI);
+
+    float F;
+    if (cosThetaT2 < 0.0f)
+    {
+        wo = f4(-wi.x, -wi.y, wi.z);
+        float cosThetaO = wo.z;
+        f_val = f4(1.0f / fabsf(cosThetaO));
+        pdf = 1.0f;
+        return;
+    }
+    
+    F = schlick_fresnel(cosThetaI, etaI, etaT);
+
+    if (curand_uniform(&localState) < F) {
+        wo = f4(-wi.x, -wi.y, wi.z);
+        float cosThetaO = wo.z;
+        pdf = F;
+        f_val = f4(F / fabsf(cosThetaO));
+    } 
+    else {
+        float eta = etaI / etaT;
+
+        wo = f4(
+            -eta * wi.x, 
+            -eta * wi.y, 
+            - (sqrtf(cosThetaT2))
+        );
+
+        float cosThetaO = wo.z;
+        // BSDF term
+        f_val = f4((1.0f - F) * eta * eta / fabsf(cosThetaO));
+        pdf = 1.0f - F;
+    }
+}
+
+// For dielectrics, when this function is called, we know whether or not it refracts, and that etaI and etaT are in fact correct
+// wi passed in is facing the surface, so we flip it normally. The shading uses wi as pointing away
 __device__ void f_eval(curandState& localState, const Material* materials, int materialID, 
-    const float4& wi, const float4& wo, float4& f_val)
+    const float4& wi, const float4& wo, float etaI, float etaT, float4& f_val, bool reflect_dielectric, bool TIR)
 {
     const Material& mat = materials[materialID];
     if (mat.type == MAT_DIFFUSE)
@@ -161,12 +309,18 @@ __device__ void f_eval(curandState& localState, const Material* materials, int m
     }
     else if (mat.type == MAT_METAL)
     {
-        microfacet_f(mat.eta, mat.k, mat.roughness, -wi, wo, f_val);
+        microfacet_metal_f(mat.eta, mat.k, mat.roughness, -wi, wo, f_val);
+    }
+    else if (mat.type == MAT_SMOOTHDIELECTRIC)
+    {
+        smooth_dielectric_f(-wi, wo, etaI, etaT, reflect_dielectric, TIR, f_val);
     }
 }
 
+// For dielectrics, when this function is called, we know whether or not it refracts, and that etaI and etaT are in fact correct
+// wi passed in is facing the surface, so we flip it normally. The shading uses wi as pointing away
 __device__ void sample_f_eval(curandState& localState, const Material* materials, int materialID, 
-    const float4& wi, float4& wo, float4& f_val, float& pdf)
+    const float4& wi, float etaI, float etaT, bool backface, float4& wo, float4& f_val, float& pdf)
 {
     const Material& mat = materials[materialID];
     if (mat.type == MAT_DIFFUSE)
@@ -175,11 +329,18 @@ __device__ void sample_f_eval(curandState& localState, const Material* materials
     }
     else if (mat.type == MAT_METAL)
     {
-        microfacet_sample_f(localState, mat.eta, mat.k, mat.roughness, -wi, wo, f_val, pdf);
+        microfacet_metal_sample_f(localState, mat.eta, mat.k, mat.roughness, -wi, wo, f_val, pdf);
+    }
+    else if (mat.type == MAT_SMOOTHDIELECTRIC)
+    {
+        //dumb_smooth_dielectric_sample_f(localState, -wi, mat.ior, backface , wo, f_val, pdf);
+        smooth_dielectric_sample_f(localState, -wi, etaI, etaT, wo, f_val, pdf);
     }
 }
 
-__device__ void pdf_eval(Material* materials, int materialID, const float4& wi, const float4& wo, float& pdf)
+// For dielectrics, when this function is called, we know whether or not it refracts, and that etaI and etaT are in fact correct
+// wi passed in is facing the surface, so we flip it normally. The shading uses wi as pointing away
+__device__ void pdf_eval(Material* materials, int materialID, const float4& wi, const float4& wo, float etaI, float etaT, float& pdf, bool reflect_dielectric, bool TIR)
 {
     const Material& mat = materials[materialID];
     if (mat.type == MAT_DIFFUSE)
@@ -188,6 +349,10 @@ __device__ void pdf_eval(Material* materials, int materialID, const float4& wi, 
     }
     else if (mat.type == MAT_METAL)
     {
-        microfacet_pdf(mat.roughness, -wi, wo, pdf);
+        microfacet_metal_pdf(mat.roughness, -wi, wo, pdf);
+    }
+    else if (mat.type == MAT_SMOOTHDIELECTRIC)
+    {
+        smooth_dielectric_pdf(-wi, wo, etaI, etaT, reflect_dielectric, TIR, pdf);
     }
 }

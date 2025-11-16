@@ -63,7 +63,7 @@ int partitionPrimitives(vector<int>& indices, vector<float4>& centroids, int sta
 void SAH( vector<int>& indices, vector<float4>& centroids, vector<float4>& AABBmins, vector<float4>& AABBmaxes, int start, 
     int end, int& axis, float4 minBound, float4 maxBound, float& splitPos, float& minCost, int& backup)
 {
-    const int numBuckets = 20;
+    const int numBuckets = 30;
     struct Bucket { float4 min, max; int count; };
     Bucket buckets[numBuckets];
     for (int i = 0; i < numBuckets; i++) 
@@ -242,12 +242,13 @@ int main ()
 {
     auto start = std::chrono::high_resolution_clock::now();
     // image setup
-    int w = 1000;
-    int h = 1000;
+    int w = 2000;
+    int h = 2000;
     Image image = Image(w, h);
 
-    int sampleCount = 1000;
-    int maxLeafSize = 40;
+    int sampleCount = 1;
+    int maxDepth = 15;
+    int maxLeafSize = 3;
 
     cout << "Rendering at " << w << " by " << h << " pixels, with " << 
         sampleCount << " samples per pixel, and a maximum leaf size of " <<
@@ -273,17 +274,42 @@ int main ()
     Material lambertBlue = Material::Diffuse(f4(0.4f,0.4f,0.8f));
     Material lambertWhite = Material::Diffuse(f4(0.9f,0.9f,0.9f));
     Material lambertGreen = Material::Diffuse(f4(0.2f,0.6f,0.6f));
+    Material lambertRed = Material::Diffuse(f4(0.99f,0.01f,0.01f));
+
+    float4 eta_steel = f4(0.14f, 0.16f, 0.13f, 1.0f);   // real part (R,G,B,alpha)
+    float4 k_steel   = f4(4.1f, 2.3f, 3.1f, 1.0f);     // imaginary part (absorption)
+
 
     float4 eta_gold = f4(0.17f, 0.35f, 1.5f);  // real part of refractive index
     float4 k_gold   = f4(3.1f, 2.7f, 1.9f);   // imaginary part, absorption
-    float roughness_polished = 0.1f;  
+    float roughness_polished = 0.05f;  
+    float roughness_rough = 0.15f;  
 
-    Material ironPolished = Material::Metal(eta_gold, eta_gold, roughness_polished);
+    Material gold = Material::Metal(eta_gold, eta_gold, roughness_polished);
+    Material steel = Material::Metal(eta_steel, eta_steel, roughness_rough);
 
-    mats.push_back(lambertBlue); // index 0
-    mats.push_back(lambertWhite); // index 1
-    mats.push_back(lambertGreen); // index 2
-    mats.push_back(ironPolished); // index 3
+    float roughness = 0.05f;
+    float ior = 1.5f;
+
+    Material glass = Material::SmoothDielectric(ior, f4(0.0f), 1);
+
+    Material water = Material::SmoothDielectric(1.333f, 2.5f * f4(0.180f, 1.5f, 2.996f), 2);
+
+    Material ice = Material::SmoothDielectric(1.31f, f4(0.0f), 0);
+
+    Material air = Material::SmoothDielectric(1.0f, f4(0.0f), 99);
+
+    mats.push_back(air); // index 0
+
+    mats.push_back(lambertBlue); // index 1
+    mats.push_back(lambertWhite); // index 2
+    mats.push_back(lambertGreen); // index 3
+    mats.push_back(gold); // index 4
+    mats.push_back(glass); // index 5
+    mats.push_back(lambertRed); // index 6
+    mats.push_back(steel); // index 7
+    mats.push_back(water); // index 8
+    mats.push_back(ice); // index 9
 
     Material* mats_d;
 
@@ -291,18 +317,25 @@ int main ()
     cudaMemcpy(mats_d, mats.data(), mats.size() * sizeof(Material), cudaMemcpyHostToDevice);
     
     
-    readObjSimple("scenedata/smallbox.obj", points, normals, colors, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 1);
+    readObjSimple("scenedata/largebox.obj", points, normals, colors, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 2);
     //cout << "scene data read. There are " << mesh.size() << " Triangles." << endl;
-    readObjSimple("scenedata/leftwall.obj", points, normals, colors, mesh, lightsvec, f4(0.4f,0.4f,0.8f), f4(), 0);
-    readObjSimple("scenedata/rightwall.obj", points, normals, colors, mesh, lightsvec, f4(0.2f,0.6f,0.6f), f4(), 2);
-    readObjSimple("scenedata/tophalfmiku.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 3);
+    readObjSimple("scenedata/leftwall.obj", points, normals, colors, mesh, lightsvec, f4(0.4f,0.4f,0.8f), f4(), 1);
+    readObjSimple("scenedata/rightwall.obj", points, normals, colors, mesh, lightsvec, f4(0.8f,0.2f,0.2f), f4(), 3);
+    //readObjSimple("scenedata/rightwall.obj", points, normals, colors, mesh, lightsvec, f4(0.2f,0.6f,0.6f), f4(), 2);
+    //readObjSimple("scenedata/leftball.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 4);
+    //readObjSimple("scenedata/glasspanethick.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 4);
+    readObjSimple("scenedata/dragon.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
+    //readObjSimple("scenedata/water.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 8);
+    //readObjSimple("scenedata/icecubes.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 9);
+    //readObjSimple("scenedata/spoon.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 7);
+    //readObjSimple("scenedata/swordbetter.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.1f,0.1f), f4(), 3);//5.0f*f4(3.0f,1.0f,1.0f)
     //readObjSimple("scenedata/character.obj", vertices, mesh, lightsvec, 1.0f*f4(0.9f,0.9f,0.9f), f4(), 1);
-    //readObjSimple("scenedata/smallbox.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.9f,0.9f), f4(), 1);
+    //readObjSimple("scenedata/smallcube.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.9f,0.9f), f4(), 5);
     //readObjSimple("scenedata/swordbetter.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), f4(), 1);
-    //readObjSimple("scenedata/leftlight.obj", vertices, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 20.0f*f4(10.0f,1.0f,1.0f), 1);
-    //readObjSimple("scenedata/rightlight.obj", vertices, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 3.0f*f4(3.0f,3.0f,10.0f), 1);
+    //readObjSimple("scenedata/leftlight.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 20.0f*f4(10.0f,1.0f,1.0f), 2);
+    //readObjSimple("scenedata/rightlight.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 3.0f*f4(3.0f,3.0f,10.0f), 2);
     //readObjSimple("scenedata/reallysmalllight.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 30.0f*f4(7.0f,7.0f,3.0f), 1);
-    readObjSimple("scenedata/lightforward.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 1.600f*f4(7.0f,7.0f,3.0f), 1);
+    readObjSimple("scenedata/lightforward.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 1.7f*f4(6.0f,7.0f,7.0f), 2);
 
         
     Vertices* verts;
@@ -369,7 +402,7 @@ int main ()
     cudaMemcpy(BVHindices, indvec.data(), indvec.size() * sizeof(int), cudaMemcpyHostToDevice);
 
 
-    launch(6, mats_d ,BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, true, w, h, out_colors);
+    launch(maxDepth, mats_d ,BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, true, w, h, out_colors);
 
     float4* host_colors = new float4[w * h];
     cudaMemcpy(host_colors, out_colors, w * h * sizeof(float4), cudaMemcpyDeviceToHost);

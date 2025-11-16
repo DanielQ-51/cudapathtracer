@@ -184,3 +184,33 @@ inline __host__ float surfaceArea(const float4& min, const float4& max)
 __device__ __forceinline__ float4 sqrtf4(const float4& v) {
     return make_float4(sqrtf(v.x), sqrtf(v.y), sqrtf(v.z), 0.0f);
 }
+
+__device__ __forceinline__ float4 rotateX(const float4& v, float angle)
+{
+    float c = cosf(angle), s = sinf(angle);
+    return f4(
+        v.x,
+        v.y * c - v.z * s,
+        v.y * s + v.z * c
+    );
+}
+
+__device__ __forceinline__ float4 rotateY(const float4& v, float angle)
+{
+    float c = cosf(angle), s = sinf(angle);
+    return f4(
+        v.x * c + v.z * s,
+        v.y,
+        -v.x * s + v.z * c
+    );
+}
+
+__device__ __forceinline__ float4 rotateZ(const float4& v, float angle)
+{
+    float c = cosf(angle), s = sinf(angle);
+    return f4(
+        v.x * c - v.y * s,
+        v.x * s + v.y * c,
+        v.z
+    );
+}
