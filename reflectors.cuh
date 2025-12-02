@@ -108,13 +108,11 @@ __device__ void microfacet_metal_f(const float4& eta, const float4& k, float rou
     f_val = (D * G * f) / fmaxf(4.0f * nDotWi * nDotWo, EPSILON);
 }
 
-__device__ void microfacet_metal_pdf(const float& roughness, const float4& wi, const float4& wo, float& pdf)
+__device__ void microfacet_pdf(const float& roughness, const float4& wi, const float4& wo, float& pdf)
 {
-
     float4 h = normalize(wi + wo);
     float D = D_GGX(h, roughness *roughness);
     float denom = 4.0f * dot(wo, h);
-    //if (denom <= EPSILON) { pdf = 0.0f; return; }
     pdf = (D * h.z) / (denom);
 }
 
@@ -137,7 +135,7 @@ __device__ void microfacet_metal_sample_f(curandState& localState, const float4&
     if (wo.z <= 0.0f) wo.z = -wo.z;
     
     microfacet_metal_f(eta, k, roughness, wi, wo, f_val); // f_val set
-    microfacet_metal_pdf(roughness, wi, wo, pdf); // pdf set
+    microfacet_pdf(roughness, wi, wo, pdf); // pdf set
 }
 
 // fabs is used here for costheta
@@ -191,7 +189,14 @@ __device__ void smooth_dielectric_sample_f(curandState& localState,
     {
         wo = f4(-wi.x, -wi.y, wi.z);
         float cosThetaO = wo.z;
-        f_val = f4(1.0f / fabsf(cosThetaO));
+
+        if (fabsf(cosThetaO) < EPSILON) {
+            pdf = 0.0f;
+            f_val = f4(0.0f);
+            return;
+        }
+
+        f_val = f4(1.0f / cosThetaO);
         pdf = 1.0f;
         return;
     }
@@ -201,6 +206,11 @@ __device__ void smooth_dielectric_sample_f(curandState& localState,
     if (curand_uniform(&localState) < F) {
         wo = f4(-wi.x, -wi.y, wi.z);
         float cosThetaO = wo.z;
+        if (fabsf(cosThetaO) < EPSILON) {
+            pdf = 0.0f;
+            f_val = f4(0.0f);
+            return;
+        }
         pdf = F;
         f_val = f4(F / fabsf(cosThetaO));
     } 
@@ -212,10 +222,17 @@ __device__ void smooth_dielectric_sample_f(curandState& localState,
             -eta * wi.y, 
             - (sqrtf(cosThetaT2))
         );
+        wo = normalize(wo);
 
         float cosThetaO = wo.z;
+
+        if (fabsf(cosThetaO) < EPSILON) {
+            pdf = 0.0f;
+            f_val = f4(0.0f);
+            return;
+        }
         // BSDF term
-        f_val = f4((1.0f - F) * eta * eta / fabsf(cosThetaO));
+        f_val = f4((1.0f - F) * eta * eta / cosThetaO);
         pdf = 1.0f - F;
     }
     
@@ -297,12 +314,198 @@ __device__ void dumb_smooth_dielectric_sample_f(curandState& localState,
     }
 }
 
+__device__ void sampleTexture(const Material& mat, float4* textures, const float2 uv, float4& albedo)
+{
+    int width = mat.width;
+    int height = mat.height;
+
+    // 1. Coordinate scaling
+    // We do not floor u/v here yet to preserve precision for the fraction
+    float fx = uv.x * width - 0.5f;
+    float fy = uv.y * height - 0.5f;
+
+    // 2. Determine grid corners (flooring)
+    int x_int = static_cast<int>(floorf(fx));
+    int y_int = static_cast<int>(floorf(fy));
+
+    // 3. Calculate fractions (The weights)
+    // We use the float coordinate minus the floor coordinate, BEFORE clamping/wrapping
+    float sx = fx - floorf(fx);
+    float sy = fy - floorf(fy);
+
+    // 4. Handle Wrapping (Modulo Arithmetic) 
+    // This ensures pixel (width) wraps to 0, and pixel (-1) wraps to (width-1)
+    auto wrap = [](int val, int dim) {
+        int r = val % dim;
+        return r < 0 ? r + dim : r;
+    };
+
+    int x0 = wrap(x_int, width);
+    int y0 = wrap(y_int, height);
+    int x1 = wrap(x_int + 1, width);
+    int y1 = wrap(y_int + 1, height);
+
+    // 5. Fetch texels
+    // Note: Depending on memory layout, these 4 reads are likely uncoalesced 
+    // and will cause significant memory latency.
+    float4 c00 = textures[mat.startInd + y0 * width + x0];
+    float4 c10 = textures[mat.startInd + y0 * width + x1];
+    float4 c01 = textures[mat.startInd + y1 * width + x0];
+    float4 c11 = textures[mat.startInd + y1 * width + x1];
+
+    // 6. Interpolate (Lerp)
+    // Using mix/lerp helper functions is usually cleaner:
+    // lerp(a, b, t) = a + t*(b-a)
+    float4 bottom = c00 * (1.0f - sx) + c10 * sx;
+    float4 top    = c01 * (1.0f - sx) + c11 * sx;
+    
+    albedo = bottom * (1.0f - sy) + top * sy;
+}
+
+// convention: wi always faces away from the surface (same dir as surface normal)
+__device__ void leaf_f(const float4& albedo, float ior, float currIOR, float roughness, float transmission, const float4& wi, const float4& wo, float4& f_val)
+{
+    bool is_reflection = wo.z * wi.z > 0.0f;
+
+    float4 h;
+    float F;
+    
+    F = schlick_fresnel(wi.z, currIOR, ior); 
+
+    if (is_reflection) // if it reflected with respect to the surface normal (add f_val from both events, reflection and diffuse)
+    {
+        h = normalize(wi + wo);
+        float microfacet_F = schlick_fresnel(dot(wi, h), currIOR, ior);
+        float nDotWi = wi.z;
+        float nDotWo = wo.z;
+
+        if (h.z <= 0.0f) h = -h; // flip so h.z > 0
+        
+        float alpha = roughness * roughness;
+
+        float D = D_GGX(h, alpha);
+        float G = G_Smith(wi, wo, h, alpha);
+
+        float4 f_cuticle = f4(D * G * microfacet_F / fmaxf(4.0f * nDotWi * nDotWo, EPSILON));
+
+        //if (D * G * microfacet_F < 0.0f) printf("negative numerator");
+
+        if (microfacet_F < 0.0f) printf("negative microfacetF");
+
+        if (microfacet_F > 1.0f) printf("greater than 1 microfacetF %f: dot = %f, currIOR = %f, ior = %f\n", microfacet_F, dot(wi, h), currIOR, ior);
+
+        float4 f_diffuse_val;
+        cosine_f(albedo, f_diffuse_val);
+
+        f_val = (1.0f-microfacet_F) * (1.0f - transmission) * f_diffuse_val + f_cuticle;
+    }
+    else
+    {
+        cosine_f(albedo, f_val);
+        f_val *= transmission * (1.0f - F);
+    }
+}
+
+__device__ void leaf_pdf(float ior, float currIOR, float roughness, float transmission, const float4& wi, const float4& wo, float& pdf)
+{
+    bool is_reflection = wo.z * wi.z > 0.0f;
+
+    float4 h;
+    float F;
+    
+    F = schlick_fresnel(abs(wi.z), currIOR, ior); 
+
+    F = fminf(F, 1.0f - 0.1f * roughness);
+
+    float p_specular = F;
+    float p_diffuse_refl = (1.0f - F) * (1.0f - transmission);
+    float p_diffuse_trans = (1.0f - F) * transmission;
+    
+    if (is_reflection) // if it reflected with respect to the surface normal
+    {
+        h = normalize(wi + wo);
+        if (h.z < 0.0f) h = -h;
+        
+        float nDotWi = wi.z;
+        float nDotWo = wo.z;
+        float alpha = roughness * roughness;
+
+        float D = D_GGX(h, alpha);
+        float G = G_Smith(wi, wo, h, alpha);
+
+        float denom = 4.0f * dot(wo, h);
+        float pdf_cuticle_bounce = (D * h.z) / (denom);
+
+        float pdf_diffuse;
+        
+        cosine_pdf(wo, pdf_diffuse);
+
+        pdf = (p_specular * pdf_cuticle_bounce) + (p_diffuse_refl * pdf_diffuse);
+    }
+    else
+    {
+        float pdf_trans;
+        cosine_pdf(-wo, pdf_trans);
+
+        pdf = pdf_trans * p_diffuse_trans;
+    }
+}
+
+__device__ void leaf_sample_f(curandState& localState, const float4& wi, float ior, float currIOR, float roughness, const float4& albedo, float transmission, float4& wo, float4& f_val, float& pdf)
+{
+    float F = schlick_fresnel(wi.z, currIOR, ior);
+
+    if (curand_uniform(&localState) < F) // reflection on cuticle layer
+    {
+        float u1 = curand_uniform(&localState);
+
+        float alpha = roughness * roughness;
+        float phi = 2.0f * PI * curand_uniform(&localState);
+        float cosTheta = sqrtf((1.0f - u1) / (1.0f + (alpha*alpha - 1.0f) * u1));
+        float sinTheta = sqrtf(fmaxf(1.0f - cosTheta*cosTheta, 0.0f));
+
+        float4 h_local;
+        h_local.x = sinTheta * cosf(phi);
+        h_local.y = sinTheta * sinf(phi);
+        h_local.z = cosTheta; // points along local normal
+
+        wo = 2.0f * dot(wi, h_local) * h_local - wi;
+    }
+    else // transmit through cuticle
+    {
+        if (curand_uniform(&localState) < transmission) // go through leaf
+        {
+            cosine_sample_f(localState, albedo, wo, f_val, pdf);
+            wo.z = -wo.z;
+        }
+        else // diffuse bounce off leaf
+        {
+            cosine_sample_f(localState, albedo, wo, f_val, pdf);
+        }
+    }
+
+    leaf_f(albedo, ior, currIOR, roughness, transmission, wi, wo, f_val);
+    leaf_pdf(ior, currIOR, roughness, transmission, wi, wo, pdf);
+}
+
 // For dielectrics, when this function is called, we know whether or not it refracts, and that etaI and etaT are in fact correct
 // wi passed in is facing the surface, so we flip it normally. The shading uses wi as pointing away
-__device__ void f_eval(curandState& localState, const Material* materials, int materialID, 
-    const float4& wi, const float4& wo, float etaI, float etaT, float4& f_val, bool reflect_dielectric, bool TIR)
+__device__ void f_eval(curandState& localState, const Material* materials, int materialID, float4* textures,
+    const float4& wi, const float4& wo, float etaI, float etaT, float4& f_val, const float2 uv)
 {
     const Material& mat = materials[materialID];
+    float4 albedo = mat.albedo;
+    if (mat.hasTexture)
+        sampleTexture(mat, textures, uv, albedo);
+
+    float trans = mat.transmission;
+    float4 trans4;
+    if (mat.hasTransMap)
+    {
+        sampleTexture(mat, textures, uv, trans4);
+        trans = trans4.x;
+    }
+
     if (mat.type == MAT_DIFFUSE)
     {
         cosine_f(mat.albedo, f_val);
@@ -313,19 +516,35 @@ __device__ void f_eval(curandState& localState, const Material* materials, int m
     }
     else if (mat.type == MAT_SMOOTHDIELECTRIC)
     {
-        smooth_dielectric_f(-wi, wo, etaI, etaT, reflect_dielectric, TIR, f_val);
+        //smooth_dielectric_f(-wi, wo, etaI, etaT, reflect_dielectric, TIR, f_val);
+    }
+    else if (mat.type == MAT_LEAF)
+    {
+        leaf_f(albedo, mat.ior, etaI, mat.roughness, trans, -wi, wo, f_val);
     }
 }
 
 // For dielectrics, when this function is called, we know whether or not it refracts, and that etaI and etaT are in fact correct
 // wi passed in is facing the surface, so we flip it normally. The shading uses wi as pointing away
-__device__ void sample_f_eval(curandState& localState, const Material* materials, int materialID, 
-    const float4& wi, float etaI, float etaT, bool backface, float4& wo, float4& f_val, float& pdf)
+__device__ void sample_f_eval(curandState& localState, const Material* materials, int materialID, float4* textures, 
+    const float4& wi, float etaI, float etaT, bool backface, float4& wo, float4& f_val, float& pdf, const float2 uv)
 {
     const Material& mat = materials[materialID];
+    float4 albedo = mat.albedo;
+    if (mat.hasTexture)
+        sampleTexture(mat, textures, uv, albedo);
+    
+    float trans = mat.transmission;
+    float4 trans4;
+    if (mat.hasTransMap)
+    {
+        sampleTexture(mat, textures, uv, trans4);
+        trans = trans4.x;
+    }
+        
     if (mat.type == MAT_DIFFUSE)
     {
-        cosine_sample_f(localState, mat.albedo, wo, f_val, pdf);
+        cosine_sample_f(localState, albedo, wo, f_val, pdf);
     }
     else if (mat.type == MAT_METAL)
     {
@@ -336,23 +555,41 @@ __device__ void sample_f_eval(curandState& localState, const Material* materials
         //dumb_smooth_dielectric_sample_f(localState, -wi, mat.ior, backface , wo, f_val, pdf);
         smooth_dielectric_sample_f(localState, -wi, etaI, etaT, wo, f_val, pdf);
     }
+    else if (mat.type == MAT_LEAF)
+    {
+        leaf_sample_f(localState, -wi, mat.ior, etaI, mat.roughness, albedo, trans, wo, f_val, pdf);
+    }
 }
 
 // For dielectrics, when this function is called, we know whether or not it refracts, and that etaI and etaT are in fact correct
 // wi passed in is facing the surface, so we flip it normally. The shading uses wi as pointing away
-__device__ void pdf_eval(Material* materials, int materialID, const float4& wi, const float4& wo, float etaI, float etaT, float& pdf, bool reflect_dielectric, bool TIR)
+__device__ void pdf_eval(Material* materials, int materialID, float4* textures, const float4& wi, const float4& wo, 
+    float etaI, float etaT, float& pdf, const float2 uv)
 {
     const Material& mat = materials[materialID];
+
+    float trans = mat.transmission;
+    float4 trans4;
+    if (mat.hasTransMap)
+    {
+        sampleTexture(mat, textures, uv, trans4);
+        trans = trans4.x;
+    }
+    
     if (mat.type == MAT_DIFFUSE)
     {
         cosine_pdf(wo, pdf);
     }
     else if (mat.type == MAT_METAL)
     {
-        microfacet_metal_pdf(mat.roughness, -wi, wo, pdf);
+        microfacet_pdf(mat.roughness, -wi, wo, pdf);
     }
     else if (mat.type == MAT_SMOOTHDIELECTRIC)
     {
-        smooth_dielectric_pdf(-wi, wo, etaI, etaT, reflect_dielectric, TIR, pdf);
+        //smooth_dielectric_pdf(-wi, wo, etaI, etaT, reflect_dielectric, TIR, pdf);
+    }
+    else if (mat.type == MAT_LEAF)
+    {
+        leaf_pdf(mat.ior, etaI, mat.roughness, trans, -wi, wo, pdf);
     }
 }

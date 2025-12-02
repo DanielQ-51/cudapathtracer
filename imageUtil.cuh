@@ -14,12 +14,15 @@ public:
     void setColor(int x, int y, float4 c);
     float4 getColor(int x, int y);
     void saveImageBMP(std::string fileName);
+    
 
     int toIndex(int x, int y);
     std::pair<int,int> fromIndex(int i);
 
+    std::vector<float4> data();
 
-private:
     const int width, height;
     std::vector<float4> pixels;
 };
+
+Image loadBMPToImage(const std::string &filename);

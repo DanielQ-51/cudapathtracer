@@ -140,6 +140,7 @@ struct Vertices
     float4* positions;
     float4* normals;
     float4* colors;
+    float2* uvs;
 };
 
 struct Triangle
@@ -149,6 +150,8 @@ struct Triangle
     int cInd;
     int naInd, nbInd, ncInd; // Normal indices
     //int normInd; // THIS ISNT BEING USED
+
+    int uvaInd, uvbInd, uvcInd;
     int materialID;
     float4 emission;
 
@@ -156,6 +159,9 @@ struct Triangle
 
     __host__ __device__ Triangle(int a, int b, int c, int na, int nb, int nc, int mat, float4 e)
         : aInd(a), bInd(b), cInd(c), naInd(na), nbInd(nb), ncInd(nc), materialID(mat), emission(e) {}
+
+    __host__ __device__ Triangle(int a, int b, int c, int na, int nb, int nc, int mat, int uva, int uvb, int uvc, float4 e)
+        : aInd(a), bInd(b), cInd(c), naInd(na), nbInd(nb), ncInd(nc), materialID(mat), uvaInd(uva), uvbInd(uvb), uvcInd(uvc), emission(e) {}
 };
 
 struct Ray
@@ -171,12 +177,20 @@ struct Ray
 
 };
 
+struct Camera
+{
+    float4 origin;
+    float4 direction;
+};
+
 struct Intersection
 {
     float4 point;
     float4 normal;
     float4 color;
     float4 emission;
+
+    float2 uv;
     //Ray ray;
     Triangle tri;
     int triIDX;
@@ -193,11 +207,24 @@ enum MaterialType {
     MAT_DIFFUSE = 0,
     MAT_METAL = 1,
     MAT_SMOOTHDIELECTRIC = 2,
-    MAT_MICROFACETDIELECTRIC = 3
+    MAT_MICROFACETDIELECTRIC = 3,
+    MAT_LEAF = 4,
+    MAT_FLOWER = 5
 };
 
 struct Material
 {
+    bool hasTexture;
+    int startInd;
+    int width;
+    int height;
+
+    bool hasTransMap;
+    int tstartInd;
+    int twidth;
+    int theight;
+
+
     int type;
     
     float4 albedo;
@@ -212,61 +239,132 @@ struct Material
     float transmission; 
 
     bool isSpecular;
-    bool transmissive; // for mediums tack calculations
+    bool boundary; // for mediums tack calculations
 
     float4 absorption;
 
     int priority; // dielectric priority, for nested dielectrics/medium stack
 
-    __host__ __device__ Material()
+    __host__ Material()
         : type(MAT_DIFFUSE), albedo(f4(0.8f)),
           roughness(0.5f), eta(f4(0)), k(f4(0)),
           ior(1.5f), metallic(0.0f), specular(1.0f), transmission(0.0f) {}
 
-    __host__ __device__ static Material Diffuse(const float4& color) {
+    __host__ static Material Diffuse(const float4& color) {
         Material m;
         m.type = MAT_DIFFUSE;
+        m.hasTexture = false;
+
         m.albedo = color;
         m.roughness = 1.0f;
-        m.transmissive = false;
+        m.boundary = false;
         m.absorption = f4();
         return m;
     }
 
-    __host__ __device__ static Material Metal(const float4& n, const float4& k, float roughness = 0.1f) {
+    __host__ static Material DiffuseTextured(int sInd, int w, int h) {
+        Material m;
+        m.type = MAT_DIFFUSE;
+        m.hasTexture = true;
+
+        m.startInd = sInd;
+        m.width = w;
+        m.height = h;
+
+        m.roughness = 1.0f;
+        m.boundary = false;
+        m.absorption = f4();
+        return m;
+    }
+
+    __host__ static Material Metal(const float4& n, const float4& k, float roughness = 0.1f) {
         Material m;
         m.type = MAT_METAL;
+        m.hasTexture = false;
+
         m.eta = n;
         m.k = k;
         m.roughness = roughness;
         m.albedo = f4(1.0f);  // metals usually reflect via Fresnel, not albedo tint
         m.metallic = 1.0f;
-        m.transmissive = false;
+        m.boundary = false;
         m.absorption = f4();
         return m;
     }
 
-    __host__ __device__ static Material SmoothDielectric(float ior = 1.5f, const float4& k = f4(), int pri = 0) {
+    __host__ static Material SmoothDielectric(float ior = 1.5f, const float4& k = f4(), int pri = 0) {
         Material m;
         m.type = MAT_SMOOTHDIELECTRIC;
+        m.hasTexture = false;
+
         m.ior = ior;
         m.albedo = f4(1.0f);
 
         m.priority = pri;
         m.isSpecular = true;
-        m.transmissive = true;
+        m.boundary = true;
 
         m.absorption = k;
         return m;
     }
 
-    __host__ __device__ static Material MicrofacetDielectric(float ior = 1.5f, float roughness = 0.0f, const float4& k = f4()) {
+    __host__  static Material MicrofacetDielectric(float ior = 1.5f, float roughness = 0.0f, const float4& k = f4()) {
         Material m;
         m.type = MAT_MICROFACETDIELECTRIC;
+        m.hasTexture = false;
+
         m.ior = ior;
         m.k = k;
         m.roughness = roughness;
         m.albedo = f4(1.0f);
+
+        return m;
+    }
+
+    __host__ static Material Leaf(int sInd, int w, int h,float ior = 1.5f, float roughness = 0.7, float4 albedo = f4(), float transmission = 0.05f)
+    {
+        Material m;
+        m.type = MAT_LEAF;
+
+        m.hasTexture = true;
+        m.hasTransMap = false;
+
+        m.ior = ior;
+        m.roughness = roughness;
+        m.albedo = albedo;
+        m.transmission = transmission;
+        m.boundary = false;
+
+        m.startInd = sInd;
+        m.width = w;
+        m.height = h;
+
+ 
+
+        return m;
+    }
+
+    __host__ static Material Leaf(int sInd, int w, int h, int tsInd, int tw, int th, float ior = 1.5f, float roughness = 0.7, float4 albedo = f4(), float transmission = 0.05f)
+    {
+        Material m;
+        m.type = MAT_LEAF;
+
+        m.hasTexture = true;
+        m.hasTransMap = true;
+        
+        m.ior = ior;
+        m.roughness = roughness;
+        m.albedo = albedo;
+        m.transmission = transmission;
+        m.boundary = false;
+
+        m.startInd = sInd;
+        m.width = w;
+        m.height = h;
+
+        m.tstartInd = tsInd;
+        m.twidth = tw;
+        m.theight = th;
 
         return m;
     }

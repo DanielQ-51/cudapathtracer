@@ -17,8 +17,20 @@ inline __host__ __device__ __forceinline__ float4 f4() {return make_float4(0,0,0
 
 inline __host__ __device__ __forceinline__ float4 f4(float a) {return make_float4(a,a,a,0);}
 
+inline __host__ __device__ __forceinline__ float2 f2(float x, float y) {
+    return make_float2(x, y);
+}
+
+inline __host__ __device__ __forceinline__ float2 f2() {return make_float2(0,0);}
+
+inline __host__ __device__ __forceinline__ float2 f2(float a) {return make_float2(a,a);}
+
 inline __host__ __device__ __forceinline__ float4 operator+(const float4 &a, const float4 &b) {
     return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, 0.0f);
+}
+
+inline __host__ __device__ __forceinline__ float2 operator+(const float2 &a, const float2 &b) {
+    return make_float2(a.x + b.x, a.y + b.y);
 }
 
 inline __host__ __device__ __forceinline__ float4 operator-(const float4 &a, const float4 &b) {
@@ -30,6 +42,14 @@ inline __host__ __device__ __forceinline__ float4 operator*(const float4 &a, flo
 }
 
 inline __host__ __device__ __forceinline__ float4 operator*(float t, const float4 &a) {
+    return a * t;
+}
+
+inline __host__ __device__ __forceinline__ float2 operator*(const float2 &a, float t) {
+    return make_float2(a.x * t, a.y * t);
+}
+
+inline __host__ __device__ __forceinline__ float2 operator*(float t, const float2 &a) {
     return a * t;
 }
 

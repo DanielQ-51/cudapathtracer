@@ -32,7 +32,7 @@ __device__ void triangleIntersect(Vertices* verts, Triangle* tri, const Ray& r, 
     float4 h = cross3(r.direction, e2);
     float a = dot(h, e1);
 
-    if (fabs(a) < EPSILON)
+    if (fabsf(a) < EPSILON)
     {
         barycentric = f4();
         tval = -1.0f;
@@ -143,6 +143,10 @@ __device__ void BVHSceneIntersect(const Ray& r, BVHnode* BVH, int* BVHindices, V
                     intersect.normal = normalize(verts->normals[tri->naInd] * barycentric.z + 
                                         verts->normals[tri->nbInd] * barycentric.x + 
                                         verts->normals[tri->ncInd] * barycentric.y);
+
+                    intersect.uv = verts->uvs[tri->uvaInd] * barycentric.z + 
+                        verts->uvs[tri->uvbInd] * barycentric.x + 
+                        verts->uvs[tri->uvcInd] * barycentric.y;
                     if (dot(intersect.normal, r.direction) > 0.0f) 
                     {
                         intersect.normal = -intersect.normal;
@@ -160,6 +164,107 @@ __device__ void BVHSceneIntersect(const Ray& r, BVHnode* BVH, int* BVHindices, V
             }
         }
         // 3. If it's an internal node, push its children onto the stack
+        else
+        {
+            if (node.left >= 0 || node.right >= 0)
+            {
+                float tminL, tmaxL, tminR, tmaxR;
+                bool hitLeft = false, hitRight = false;
+
+                // Test left child if it exists
+                if (node.left >= 0)
+                    hitLeft = aabbIntersect(r, BVH[node.left].aabbMIN, BVH[node.left].aabbMAX, tminL, tmaxL);
+
+                // Test right child if it exists
+                if (node.right >= 0)
+                    hitRight = aabbIntersect(r, BVH[node.right].aabbMIN, BVH[node.right].aabbMAX, tminR, tmaxR);
+
+                // If both children were hit, push the farther one first
+                if (hitLeft && hitRight)
+                {
+                    if (tminL < tminR)
+                    {
+                        nodeStack[stackTop++] = node.right; // farther
+                        nodeStack[stackTop++] = node.left;  // nearer
+                    }
+                    else
+                    {
+                        nodeStack[stackTop++] = node.left;  // farther
+                        nodeStack[stackTop++] = node.right; // nearer
+                    }
+                }
+                else if (hitLeft)
+                {
+                    nodeStack[stackTop++] = node.left;
+                }
+                else if (hitRight)
+                {
+                    nodeStack[stackTop++] = node.right;
+                }
+            }
+        }
+    }
+}
+
+__device__ void BVHShadowRay(const Ray& r, BVHnode* BVH, int* BVHindices, Vertices* verts, Triangle* scene, Material* materials, float4& throughputScale, float max_t, int skip_tri)
+{
+    int nodeStack[128];
+    int stackTop = 0;
+    nodeStack[stackTop++] = 0; // Push the root node (index 0)
+
+    while (stackTop > 0)
+    {
+        // Pop the next node to check
+        int currentIndex = nodeStack[--stackTop];
+        BVHnode& node = BVH[currentIndex];
+
+        // 2. If it's a leaf node, check its triangles
+        if (node.primCount > 0)
+        {
+            for (int i = node.first; i < node.primCount + node.first; i++)
+            {
+                int idx = BVHindices[i];
+                Triangle* tri = &scene[idx];
+                float4 barycentric;
+                float t;
+                triangleIntersect(verts, tri, r, barycentric, t);
+
+                if (idx == skip_tri)
+                    continue;
+
+                if ((t > EPSILON) && (t < max_t))
+                {
+                    int matID = tri->materialID;
+                    if (materials[matID].type == MAT_LEAF)
+                    {
+                        // 1. We hit a leaf. Don't stop. Just darken the ray.
+                        float4 transColor = materials[matID].albedo;
+                        float transmission = materials[matID].transmission;
+                        
+                        float4 n = verts->normals[tri->naInd] * barycentric.z + 
+                        verts->normals[tri->nbInd] * barycentric.x + 
+                        verts->normals[tri->ncInd] * barycentric.y;
+                        
+                        float cosTheta = fabsf(dot(r.direction, normalize(n)));
+                        
+                        float F = schlick_fresnel(cosTheta, 1.0f, materials[matID].ior);
+                        
+                        throughputScale *= transColor * transmission * (1.0f - F);
+
+                        if (fmaxf(throughputScale.x, fmaxf(throughputScale.y, throughputScale.z)) < 0.01f) 
+                        {
+                            throughputScale = f4(0.0f);
+                            return;
+                        }
+                    }
+                    else 
+                    {
+                        throughputScale = f4(0.0f);
+                        return;
+                    }
+                }
+            }
+        }
         else
         {
             if (node.left >= 0 || node.right >= 0)
@@ -248,10 +353,34 @@ __global__ void initRNG(curandState* states, int width, int height, unsigned lon
     curand_init(seed, idx, 0, &states[idx]);  
 }
 
+__device__ void neePDF(Vertices* vertices, Triangle* scene, int lightNum, Triangle* light, const Intersection& intersect, 
+    float& light_pdf, float etaI, float etaT, const Intersection* newIntersect)
+{
+    Triangle l = *light;
+    float4 apos = vertices->positions[l.aInd];
+    float4 bpos = vertices->positions[l.bInd];
+    float4 cpos = vertices->positions[l.cInd];
+    float4 p = newIntersect->point;
+    float4 n = newIntersect->normal;
 
-__device__ void nextEventEstimation(curandState& localState, Material* materials, BVHnode* BVH, int* BVHindices, Vertices* vertices, int vertNum,
-    Triangle* scene, int triNum, Triangle* lights, int lightNum, int materialID, const Intersection& intersect, const float4& wo, 
-    float& light_pdf, float4& contribution, float4& surfaceToLight_local, float etaI, float etaT, bool reflect, bool TIR, Triangle* light = nullptr, const Intersection* newIntersect = nullptr)
+    float4 surfaceToLight = p-intersect.point;
+    float4 wi = normalize(surfaceToLight);
+
+    float distanceSQR = lengthSquared(surfaceToLight);
+    float4 lightNormal = vertices->normals[l.naInd];
+
+    float cosThetaLight = dot(lightNormal, -wi);
+    float cosThetaSurface = fabsf(dot(n, wi));
+
+    float area = 0.5f * length(cross3(bpos - apos, cpos - apos));
+    
+    light_pdf = distanceSQR / (cosThetaLight * lightNum * area);
+}
+
+
+__device__ void nextEventEstimation(curandState& localState, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, Vertices* vertices,
+    Triangle* scene, Triangle* lights, int lightNum, const Intersection& intersect, const float4& wo, 
+    float& light_pdf, float4& contribution, float4& surfaceToLight_local, float etaI, float etaT)
 {
     contribution = f4(0.0f,0.0f,0.0f);
     Triangle l;
@@ -263,61 +392,45 @@ __device__ void nextEventEstimation(curandState& localState, Material* materials
     float4 p;
     float4 n;
 
-    if (light == nullptr)
-    {   
-        if (lightNum == 0)
-        {
-            light_pdf = -1.0f;
-            return;
-        }
-        int index = min(static_cast<int>(curand_uniform(&localState) * lightNum), lightNum - 1);
-        l = lights[index];
-        apos = vertices->positions[l.aInd];
-        bpos = vertices->positions[l.bInd];
-        cpos = vertices->positions[l.cInd];
-        u = sqrtf(curand_uniform(&localState));
-        v = curand_uniform(&localState);
-
-        p = (1.0f - u) * apos + u * (1.0f - v) * bpos + u * v * cpos; // point on light
-        n = intersect.normal;
-    }
-    else 
+    if (lightNum == 0)
     {
-        l = *light;
-        apos = vertices->positions[l.aInd];
-        bpos = vertices->positions[l.bInd];
-        cpos = vertices->positions[l.cInd];
-        p = newIntersect->point;
-        n = newIntersect->normal;
+        light_pdf = -1.0f;
+        return;
     }
+    int index = min(static_cast<int>(curand_uniform(&localState) * lightNum), lightNum - 1);
+    l = lights[index];
+    apos = vertices->positions[l.aInd];
+    bpos = vertices->positions[l.bInd];
+    cpos = vertices->positions[l.cInd];
+    u = sqrtf(curand_uniform(&localState));
+    v = curand_uniform(&localState);
+    p = (1.0f - u) * apos + u * (1.0f - v) * bpos + u * v * cpos; // point on light
+    n = intersect.normal;
     
-
-
-    float4 surfaceToLight = p-intersect.point;
-    
-    
-    
+    float4 surfaceToLight = p-intersect.point;  
     float4 wi = normalize(surfaceToLight);
-    Ray r = Ray(intersect.point + n * EPSILON, wi);
+
+    Ray r = Ray(intersect.point + wi * EPSILON, wi);
     
     float t;
     float4 dummy;
     triangleIntersect(vertices, &l, r, dummy, t);
     
     Intersection sceneIntersect = Intersection();
-    //sceneIntersection(r, vertices, scene, triNum, sceneIntersect, t*(0.9999), true);
-    BVHSceneIntersect(r, BVH, BVHindices, vertices, scene, sceneIntersect, t*(0.9999), true);
+    float4 throughputScale = f4(1.0f);
+    BVHShadowRay(r, BVH, BVHindices, vertices, scene, materials, throughputScale, t*(1.0f - EPSILON), -1);
     // following if statement tests for scene intersection (direct light) AND
     // whether the original light intersect was valid
-    if (!sceneIntersect.valid && t != -1.0f) // direct LOS from intersection to light
+    //if (!sceneIntersect.valid && t != -1.0f) // direct LOS from intersection to light
+    if (lengthSquared(throughputScale) > 0.0f)
     {
         float distanceSQR = lengthSquared(surfaceToLight);
         float4 lightNormal = vertices->normals[l.naInd];
 
         float cosThetaLight = dot(lightNormal, -wi);
-        float cosThetaSurface = dot(n, wi);
+        float cosThetaSurface = fabsf(dot(n, wi));
 
-        float G = cosThetaLight * cosThetaSurface/distanceSQR;
+        //float G = cosThetaLight * cosThetaSurface/distanceSQR;
         float area = 0.5f * length(cross3(bpos - apos, cpos - apos));
         
         light_pdf = distanceSQR / (cosThetaLight * lightNum * area);
@@ -329,18 +442,15 @@ __device__ void nextEventEstimation(curandState& localState, Material* materials
 
         // wo is the incoming direction (passed to this function)
         // wi_local is the computed outgoing direction to the light
-        f_eval(localState, materials, materialID, wo, wi_local, etaI, etaT, f_val, reflect, TIR);
+        f_eval(localState, materials, intersect.materialID, textures, wo, wi_local, etaI, etaT, f_val, intersect.uv);
 
         contribution = f_val * Le * cosThetaSurface / light_pdf;
+        contribution *= throughputScale;
     }
-    else {}
 }
 
 __device__ void removeMaterialFromStack(int* stack, int* stackTop, int materialID)
 {
-    // 1. Find the index of the material to remove.
-    //    We search backwards from the top (*stackTop - 1) down to index 1.
-    //    We NEVER check index 0, which is our permanent 'AIR' medium.
     int i_found = -1;
     for (int i = (*stackTop) - 1; i > 0; i--)
     {
@@ -351,27 +461,17 @@ __device__ void removeMaterialFromStack(int* stack, int* stackTop, int materialI
         }
     }
 
-    // 2. If we found the material...
     if (i_found != -1)
     {
-        // 3. Shift all elements above it down by one to "fill the gap".
-        //    We start at the found index and overwrite it with the next element,
-        //    and continue this until we've moved the last element down.
         for (int i = i_found; i < (*stackTop) - 1; i++)
         {
             stack[i] = stack[i + 1];
         }
-
-        // 4. Decrement the stack top to reflect the removal.
         (*stackTop)--;
     }
-    
-    // If i_found == -1, the material wasn't in the stack (or was only at index 0).
-    // In a correct simulation, this shouldn't happen when exiting, but this
-    // function is robust against it and will simply do nothing.
 }
 
-__global__ void Li (curandState* rngStates, Material* materials, BVHnode* BVH, int* BVHindices, int maxDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
+__global__ void Li_unidirectional (curandState* rngStates, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, int maxDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
     Triangle* lights, int lightNum, int numSample, bool useMIS, int w, int h, float4* colors)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -400,17 +500,52 @@ __global__ void Li (curandState* rngStates, Material* materials, BVHnode* BVH, i
         int stackTop = 0;
         mediumStack[stackTop++] = 0; //index of AIR (IOR 1.0f, Priority 99)
 
-        float pitch = -15.0f * (3.14159265f / 180.0f);
+        float xRot = 15.0f * (3.14159265f / 180.0f);
+        float yRot = 25.0f * (3.14159265f / 180.0f);
 
-        //float4 cameraOrigin = f4(-0.10f,0.25f,-0.0f);
-        float4 cameraOrigin = f4(-0.07f,0.232f,0.8f);
-        float4 a = f4(cameraOrigin.x + (x + 2.0f*curand_uniform(&localState) - 1.0f - w/2.0f) * (1.0f / w), 
-                        cameraOrigin.y + (y + 2.0f*curand_uniform(&localState) - 1.0f - h/2.0f) * (1.0f / h),
-                        cameraOrigin.z-2.0f);
-        r.origin = cameraOrigin;
-        r.direction = rotateX(a-cameraOrigin, pitch);
+        float aperture = 0.010f;      // lens radius, controls blur
+        float focalDist = 2.15f;      // distance at which things are perfectly in focus
 
-        r.direction = normalize(r.direction);
+        float jitterX = 2.0f * curand_uniform(&localState) - 1.0f;
+        float jitterY = 2.0f * curand_uniform(&localState) - 1.0f;
+        float nx = (x + jitterX - w * 0.5f) / w;
+        float ny = (y + jitterY - h * 0.5f) / h;
+
+        //float4 cameraOrigin = f4(-0.8f, -0.05f, 2.4f);
+        float4 cameraOrigin = f4(-0.5f, -0.55f, 2.4f);
+        //float4 cameraOrigin = f4(-0.8f, 3.5f, 3.0f);
+        float aspect = (float)w / (float)h;
+
+        // Compute point on image plane (as before)
+        float4 pixelPos = f4(cameraOrigin.x + nx * aspect,
+                            cameraOrigin.y + ny,
+                            cameraOrigin.z - 1.5f);
+
+        // Compute initial ray from pinhole (for focal point calculation)
+        float4 dir = pixelPos - cameraOrigin;
+        dir = rotateX(dir, xRot);
+        dir = rotateY(dir, yRot);
+        float4 rayDir = normalize(dir);
+
+        // Focal point along ray
+        float4 focalPoint = cameraOrigin + rayDir * focalDist;
+
+        // --- Sample point on lens ---
+        float rad = sqrt(curand_uniform(&localState)) * aperture;
+        float theta = 2.0f * 3.14159265f * curand_uniform(&localState);
+        float lensX = rad * cosf(theta);
+        float lensY = rad * sinf(theta);
+
+        // Build camera basis vectors (assuming Z-forward, Y-up)
+        float4 right = f4(1.0f, 0.0f, 0.0f);  // camera right
+        float4 up = f4(0.0f, 1.0f, 0.0f);     // camera up
+
+        // New ray origin on lens
+        r.origin = cameraOrigin + lensX * right + lensY * up;
+
+        // New ray direction through focal point
+        r.direction = normalize(focalPoint - r.origin);
+
 
 
         float pdf = EPSILON;
@@ -430,7 +565,8 @@ __global__ void Li (curandState* rngStates, Material* materials, BVHnode* BVH, i
 
             if (!intersect.valid) 
             {
-                Li += beta * f4(0.4f,0.6f,0.6f);
+                float4 bg = f4(0.95f, 0.95f, 1.0f);
+                Li += beta * bg;
                 break;
             }
             
@@ -473,7 +609,7 @@ __global__ void Li (curandState* rngStates, Material* materials, BVHnode* BVH, i
                 beta *= attenuation;
             }
             
-            if (materials[materialID].transmissive)
+            if (materials[materialID].boundary) // if this material is a boundary between media
             {
                 
                 if (materials[materialID].priority <= minPrior) // new material has lower or equal priority to the minimum priority
@@ -533,6 +669,8 @@ __global__ void Li (curandState* rngStates, Material* materials, BVHnode* BVH, i
                     }
                 }
             }
+            else // if this isnt a boundary event. We still need to know the current medium ior for thin walled events
+                etaI = materials[minPriorID].ior; 
 
             if (trueHit)
             {
@@ -544,15 +682,9 @@ __global__ void Li (curandState* rngStates, Material* materials, BVHnode* BVH, i
                     }
                     else if (useMIS && !isSpecular) // found light using BSDF sampling, weigh against NEE
                     {
-                        float4 nee;
                         float light_pdf = EPSILON;
-                        float4 dummy;
-
-                        // to calculate the light sampling pdf (a little inefficient)
-                        nextEventEstimation(localState, materials, BVH, BVHindices, vertices, vertNum, scene, 
-                            triNum, lights, lightNum, materialID, previousintersectREAL, old_wi_local, light_pdf, 
-                            nee, dummy, -1.0f, -1.0f, false, false, &intersect.tri, &intersect); // wi_local is used from the previous bounce
                         
+                        neePDF(vertices, scene, lightNum, &intersect.tri, previousintersectREAL, light_pdf, etaI, etaT, &intersect);
                         if (light_pdf > EPSILON)
                         {
                             float bsdfWeight = pdf * pdf / (light_pdf * light_pdf 
@@ -568,22 +700,21 @@ __global__ void Li (curandState* rngStates, Material* materials, BVHnode* BVH, i
                     float light_pdf = EPSILON;
                     // we get wo_local, the direction from surface to sampled light, to evaluate the bsdf pdf, 
                     // and store it in wo_local
-                    nextEventEstimation(localState, materials, BVH, BVHindices, vertices, vertNum, scene, 
-                    triNum, lights, lightNum, materialID, intersect, wi_local, light_pdf, nee, wo_local, -1.0f, -1.0f, false, false);
-                    
+                    nextEventEstimation(localState, materials, textures, BVH, BVHindices, vertices, scene, lights, lightNum, intersect, 
+                        wi_local, light_pdf, nee, wo_local, etaI, etaT);
                     
                     if (light_pdf > EPSILON)
                     {
                         // to calculate the bsdf pdf
-                        pdf_eval(materials, materialID, wi_local, wo_local, -1.0f, -1.0f, pdf, false, false); // stores the bsdf pdf val in pdf
+                        pdf_eval(materials, materialID, textures, wi_local, wo_local, etaI, etaT, pdf, intersect.uv); // stores the bsdf pdf val in pdf
                         float neeWeight = light_pdf * light_pdf / (pdf * pdf + light_pdf * light_pdf);
 
                         Li += beta * nee * neeWeight;
                     }
-                    
+
                 }
                 float4 f_val = f4();
-                sample_f_eval(localState, materials, materialID, wi_local, etaI, etaT, intersect.backface, wo_local, f_val, pdf);
+                sample_f_eval(localState, materials, materialID, textures, wi_local, etaI, etaT, intersect.backface, wo_local, f_val, pdf, intersect.uv);
 
                 float4 wo_world= f4();
                 toWorld(wo_local, intersect.normal, wo_world);
@@ -607,7 +738,7 @@ __global__ void Li (curandState* rngStates, Material* materials, BVHnode* BVH, i
                 }
                 
 
-                beta *= (f_val * fabs(wo_local.z) / pdf);
+                beta *= (f_val * fabsf(wo_local.z) / pdf);
                 //beta = fminf4(beta, f4(10.0f));
 
                 if (wo_local.z > 0) // reflected
@@ -648,14 +779,14 @@ __global__ void Li (curandState* rngStates, Material* materials, BVHnode* BVH, i
             }
             
         }
-        if (lengthSquared(Li) >= EPSILON)
-            colorSum += Li;
+        Li = f4(fmaxf(Li.x, 0.0f), fmaxf(Li.y, 0.0f), fmaxf(Li.z, 0.0f));
+        colorSum += Li;
     }
     colors[pixelIdx] = colorSum/numSample;
     rngStates[pixelIdx] = localState;
 }
 
-__host__ void launch(int maxDepth, Material* materials, BVHnode* BVH, int* BVHindices, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
+__host__ void launch_unidirectional(int maxDepth, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
     Triangle* lights, int lightNum, int numSample, bool useMIS, int w, int h, float4* colors)
 {
     dim3 blockSize(16, 16);  
@@ -667,7 +798,7 @@ __host__ void launch(int maxDepth, Material* materials, BVHnode* BVH, int* BVHin
     initRNG<<<gridSize, blockSize>>>(d_rngStates, w, h, seed);
     cudaDeviceSynchronize();
 
-    Li<<<gridSize, blockSize>>>(d_rngStates, materials, BVH, BVHindices, maxDepth, vertices, vertNum, scene, triNum, 
+    Li_unidirectional<<<gridSize, blockSize>>>(d_rngStates, materials, textures, BVH, BVHindices, maxDepth, vertices, vertNum, scene, triNum, 
         lights, lightNum, numSample, useMIS, w, h, colors);
 
     cudaDeviceSynchronize();

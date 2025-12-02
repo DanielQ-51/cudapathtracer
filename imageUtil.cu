@@ -101,6 +101,56 @@ void Image::saveImageBMP(std::string fileName) {
     out.close();
 }
 
+Image loadBMPToImage(const std::string &filename) {
+    std::ifstream in(filename, std::ios::binary);
+    if (!in.is_open()) {
+        std::cerr << "Failed to open BMP: " << filename << "\n";
+        return Image(0,0);
+    }
+
+    BMPFileHeader fileHeader;
+    BMPInfoHeader infoHeader;
+
+    in.read(reinterpret_cast<char*>(&fileHeader), sizeof(fileHeader));
+    in.read(reinterpret_cast<char*>(&infoHeader), sizeof(infoHeader));
+
+    if (fileHeader.bfType != 0x4D42) {
+        std::cerr << "Not a BMP file: " << filename << "\n";
+        return Image(0,0);
+    }
+
+    if (infoHeader.biBitCount != 24) {
+        std::cerr << "Only 24-bit BMP supported: " << filename << "\n";
+        return Image(0,0);
+    }
+
+    int width = infoHeader.biWidth;
+    int height = infoHeader.biHeight;
+
+    Image img = Image(width, height); // resize your Image
+
+    int rowSize = (3 * width + 3) & (~3); // each row padded to multiple of 4
+    std::vector<unsigned char> row(rowSize);
+
+    for (int y = 0; y < height; y++) {
+        in.read(reinterpret_cast<char*>(row.data()), rowSize);
+        for (int x = 0; x < width; x++) {
+            float b = row[x*3 + 0] / 255.0f;
+            float g = row[x*3 + 1] / 255.0f;
+            float r = row[x*3 + 2] / 255.0f;
+            img.setColor(x, height - 1 - y, make_float4(r, g, b, 1.0f)); // flip y
+        }
+    }
+
+    in.close();
+    return img;
+}
+
+std::vector<float4> Image::data()
+{
+    return pixels;
+}
+
 void createBMPHeaders(int width, int height, BMPFileHeader &fileHeader, BMPInfoHeader &infoHeader) {
     int rowSize = (3 * width + 3) & (~3);
     int imageSize = rowSize * height;

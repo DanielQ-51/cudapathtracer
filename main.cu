@@ -13,8 +13,8 @@
 
 using namespace std;
 
-void readObjSimple(string filename, vector<float4>& points, vector<float4>& normals, vector<float4>& colors, 
-    vector<Triangle>& mesh, vector<Triangle>& lights, float4 c, float4 e, int materialID);
+void readObjSimple(string filename, vector<float4>& points, vector<float4>& normals, vector<float4>& colors, vector<float2>& uvs,vector<Triangle>& mesh, 
+    vector<Triangle>& lights, float4 c, float4 e, int materialID);
 
 void computeInfoForBVH(Vertices& vertices, vector<Triangle>& mesh, vector<float4>& centroids, 
     vector<float4>& AABBmins, vector<float4>& AABBmaxes)
@@ -167,24 +167,17 @@ int buildBVH(vector<BVHnode>& nodes, vector<int>& indices, vector<float4>& centr
 
     //int bestSplit = 0;
     float splitPos;
-    float cost;
+    float cost = 0;
     SAH(indices, centroids, AABBmins, AABBmaxes, start, end, axis, minBound, maxBound, splitPos, cost, backup);
-    
 
-    /*if (false)
-    {
+    /*if (primCount <= maxLeafSize || cost >= primCount * 1) {
+        // Force a leaf
         nodes[nodeIndex].first = start;
         nodes[nodeIndex].primCount = primCount;
         nodes[nodeIndex].left = nodes[nodeIndex].right = -1;
         largestLeaf = max(primCount, largestLeaf);
-        //cout << "force leaf Cost. Primcount: " << primCount << " cost:" << cost << endl;
         return nodeIndex;
     }*/
-        
-
-    //splitPos = (getFloat4Component(maxBound , axis) + getFloat4Component(minBound , axis))/2.0f;
-    //cout << "FIRST failed split at " << splitPos << " on the " << axis << " numbered axis" << endl; 
-    //int numLeft = 0;
     int mid;
     
     int numLeft = 0;
@@ -241,14 +234,18 @@ int buildBVH(vector<BVHnode>& nodes, vector<int>& indices, vector<float4>& centr
 int main ()
 {
     auto start = std::chrono::high_resolution_clock::now();
-    // image setup
-    int w = 2000;
-    int h = 2000;
-    Image image = Image(w, h);
+    //---------------------------------------------------------------------------------------------------------------------------------------------------
+    // Render Settings
+    //---------------------------------------------------------------------------------------------------------------------------------------------------
+    int w = 3840;
+    int h = 2160;
 
-    int sampleCount = 1;
-    int maxDepth = 15;
-    int maxLeafSize = 3;
+    int sampleCount = 3000;
+    int maxDepth = 8;
+    int maxLeafSize = 2;
+    
+
+    Image image = Image(w, h);
 
     cout << "Rendering at " << w << " by " << h << " pixels, with " << 
         sampleCount << " samples per pixel, and a maximum leaf size of " <<
@@ -260,7 +257,8 @@ int main ()
     Vertices vertices;
     vector<float4> points;
     vector<float4> normals;
-    vector<float4> colors;
+    vector<float4> colors; // unused now
+    vector<float2> uvs;
     vector<Triangle> mesh;
     vector<Triangle> lightsvec;
     vector<BVHnode> bvhvec;
@@ -270,6 +268,47 @@ int main ()
     vector<float4> maxboxes;
 
     vector<Material> mats;
+
+    //---------------------------------------------------------------------------------------------------------------------------------------------------
+    // Loading Textures
+    //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+    vector<Image> images;
+    vector<float4> pixels;
+    vector<int> widths;
+    vector<int> heights;
+    vector<int> startIndices;
+    int currentStartIndex = 0;
+
+    images.push_back(loadBMPToImage("textures/enkidutexture.bmp"));
+    images.push_back(loadBMPToImage("textures/enkiduchibitexture.bmp"));
+    images.push_back(loadBMPToImage("textures/leaftex2.bmp"));
+    images.push_back(loadBMPToImage("textures/leafautumn.bmp"));
+    images.push_back(loadBMPToImage("textures/leaftransmission.bmp"));
+
+    for (Image i : images)
+    {
+        vector<float4> pix = i.data();
+
+        pixels.insert(pixels.end(), pix.begin(), pix.end());
+
+        widths.push_back(i.width);
+        heights.push_back(i.height);
+        startIndices.push_back(currentStartIndex);
+        currentStartIndex += i.width*i.height;
+    }
+
+    float4* textures_d;
+
+    cudaMalloc(&textures_d, pixels.size() * sizeof(float4));
+    cudaMemcpy(textures_d, pixels.data(), pixels.size() * sizeof(float4), cudaMemcpyHostToDevice);
+
+    //---------------------------------------------------------------------------------------------------------------------------------------------------
+    // Creating Materials
+    //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+    Material lambertTextured = Material::DiffuseTextured(startIndices[0], widths[0], heights[0]);
+    Material lambert2Textured = Material::DiffuseTextured(startIndices[1], widths[1], heights[1]);
 
     Material lambertBlue = Material::Diffuse(f4(0.4f,0.4f,0.8f));
     Material lambertWhite = Material::Diffuse(f4(0.9f,0.9f,0.9f));
@@ -293,11 +332,19 @@ int main ()
 
     Material glass = Material::SmoothDielectric(ior, f4(0.0f), 1);
 
-    Material water = Material::SmoothDielectric(1.333f, 2.5f * f4(0.180f, 1.5f, 2.996f), 2);
+    Material water = Material::SmoothDielectric(1.333f, f4(), 2);
+    Material tea = Material::SmoothDielectric(1.333f, 2.5f * f4(0.180f, 1.5f, 2.996f), 2);
 
-    Material ice = Material::SmoothDielectric(1.31f, f4(0.0f), 0);
+    Material ice = Material::SmoothDielectric(1.31f, f4(0.2f), 0);
 
     Material air = Material::SmoothDielectric(1.0f, f4(0.0f), 99);
+
+    //Material leaf = Material::Leaf(1.5f, 0.6f, f4(0.8f, 0.25f, 0.28f), 0.2f);
+    Material leaf = Material::Leaf(startIndices[2], widths[2], heights[2], 1.5f, 0.10f, f4(0.22f, 0.75f, 0.28f), 0.15f);
+    Material leafAutumn = Material::Leaf(startIndices[3], widths[3], heights[3], startIndices[5], widths[5], heights[5], 1.5f, 0.7f, f4(0.22f, 0.75f, 0.28f), 0.01f);
+    Material canopy = Material::Leaf(startIndices[2], widths[2], heights[2], 1.5f, 0.9f, f4(0.22f, 0.75f, 0.28f), 0.7f);
+    Material leafStem = Material::Diffuse(f4(0.90f, 0.9f, 0.83f));
+    Material sky = Material::Diffuse(f4(0.4f, 0.4f, 1.00f));
 
     mats.push_back(air); // index 0
 
@@ -308,35 +355,59 @@ int main ()
     mats.push_back(glass); // index 5
     mats.push_back(lambertRed); // index 6
     mats.push_back(steel); // index 7
-    mats.push_back(water); // index 8
+    mats.push_back(tea); // index 8
     mats.push_back(ice); // index 9
+    mats.push_back(water); // index 10
+    mats.push_back(lambertTextured); // index 11
+    mats.push_back(lambert2Textured); // index 12
+    mats.push_back(leaf); // index 13
+    mats.push_back(leafStem); // index 14
+    mats.push_back(sky); // index 15
+    mats.push_back(leafAutumn); // index 16
+    //mats.push_back(green); // index 16
 
     Material* mats_d;
 
     cudaMalloc(&mats_d, mats.size() * sizeof(Material));
     cudaMemcpy(mats_d, mats.data(), mats.size() * sizeof(Material), cudaMemcpyHostToDevice);
+
+    //---------------------------------------------------------------------------------------------------------------------------------------------------
+    // Loading Scene Data
+    //---------------------------------------------------------------------------------------------------------------------------------------------------
     
     
-    readObjSimple("scenedata/largebox.obj", points, normals, colors, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 2);
+    //readObjSimple("scenedata/smallbox.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 11);
     //cout << "scene data read. There are " << mesh.size() << " Triangles." << endl;
-    readObjSimple("scenedata/leftwall.obj", points, normals, colors, mesh, lightsvec, f4(0.4f,0.4f,0.8f), f4(), 1);
-    readObjSimple("scenedata/rightwall.obj", points, normals, colors, mesh, lightsvec, f4(0.8f,0.2f,0.2f), f4(), 3);
+    //readObjSimple("scenedata/leftwall.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.4f,0.4f,0.8f), f4(), 1);
+    //readObjSimple("scenedata/rightwall.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.8f,0.2f,0.2f), f4(), 3);
     //readObjSimple("scenedata/rightwall.obj", points, normals, colors, mesh, lightsvec, f4(0.2f,0.6f,0.6f), f4(), 2);
     //readObjSimple("scenedata/leftball.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 4);
-    //readObjSimple("scenedata/glasspanethick.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 4);
-    readObjSimple("scenedata/dragon.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
-    //readObjSimple("scenedata/water.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 8);
+    //readObjSimple("scenedata/cup3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 12);
+    //readObjSimple("scenedata/leaves3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 13);
+    //readObjSimple("scenedata/leafstem.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 14);
+    //readObjSimple("scenedata/Cup.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
+    //readObjSimple("scenedata/water.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 10);
     //readObjSimple("scenedata/icecubes.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 9);
     //readObjSimple("scenedata/spoon.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 7);
     //readObjSimple("scenedata/swordbetter.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.1f,0.1f), f4(), 3);//5.0f*f4(3.0f,1.0f,1.0f)
     //readObjSimple("scenedata/character.obj", vertices, mesh, lightsvec, 1.0f*f4(0.9f,0.9f,0.9f), f4(), 1);
     //readObjSimple("scenedata/smallcube.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.9f,0.9f), f4(), 5);
     //readObjSimple("scenedata/swordbetter.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), f4(), 1);
-    //readObjSimple("scenedata/leftlight.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 20.0f*f4(10.0f,1.0f,1.0f), 2);
-    //readObjSimple("scenedata/rightlight.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 3.0f*f4(3.0f,3.0f,10.0f), 2);
+    //readObjSimple("scenedata/leftlight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 20.0f*f4(10.0f,1.0f,1.0f), 2);
+    //readObjSimple("scenedata/rightlight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 20.0f*f4(3.0f,3.0f,10.0f), 2);
     //readObjSimple("scenedata/reallysmalllight.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 30.0f*f4(7.0f,7.0f,3.0f), 1);
-    readObjSimple("scenedata/lightforward.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 1.7f*f4(6.0f,7.0f,7.0f), 2);
+    //readObjSimple("scenedata/lightforward.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.5f*f4(7.0f,7.0f,7.0f), 2);
+    //readObjSimple("scenedata/leaflight2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 2.3f*f4(9.0f,9.0f,7.0f), 2);
+    //readObjSimple("scenedata/lightbehindleaf.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 5.0f*f4(9.0f,9.0f,7.0f), 2);
+    //readObjSimple("scenedata/backlight.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 1.5f*f4(6.0f,7.0f,7.0f), 2);
 
+    readObjSimple("scenedata/sun2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 300.0f*f4(10.0f,3.0f,2.0f), 2);
+    //readObjSimple("scenedata/sunback.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f*f4(9.0f,6.0f,2.0f), 2);
+    readObjSimple("scenedata/leavescomplex.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f*f4(9.0f,9.0f,7.0f), 13);
+    readObjSimple("scenedata/branches.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f*f4(9.0f,9.0f,7.0f), 14);
+    readObjSimple("scenedata/waterdrops.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f*f4(9.0f,9.0f,7.0f), 10);
+    //readObjSimple("scenedata/wallkinda.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f*f4(9.0f,9.0f,7.0f), 6);
+    //readObjSimple("scenedata/canopy.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f * f4(0.4f, 0.4f, 1.00f), 16);
         
     Vertices* verts;
     Triangle* scene;
@@ -348,10 +419,12 @@ int main ()
     cudaMalloc(&temp.positions, sizeof(float4) * points.size());
     cudaMalloc(&temp.normals, sizeof(float4) * normals.size());
     cudaMalloc(&temp.colors,  sizeof(float4) * colors.size());
+    cudaMalloc(&temp.uvs,  sizeof(float2) * uvs.size());
 
     cudaMemcpy(temp.positions, points.data(), points.size() * sizeof(float4), cudaMemcpyHostToDevice);
     cudaMemcpy(temp.normals, normals.data(), normals.size() * sizeof(float4), cudaMemcpyHostToDevice);
     cudaMemcpy(temp.colors, colors.data(), colors.size() * sizeof(float4), cudaMemcpyHostToDevice);
+    cudaMemcpy(temp.uvs, uvs.data(), uvs.size() * sizeof(float2), cudaMemcpyHostToDevice);
     cudaMemcpy(verts, &temp, sizeof(Vertices), cudaMemcpyHostToDevice);
 
     vector<int> indvec(mesh.size());
@@ -367,9 +440,15 @@ int main ()
     std::chrono::duration<double> elapsed_seconds_afterRead = afterRead - start;
     std::cout << "Scene construction took: " << elapsed_seconds_afterRead.count() << " seconds" << std::endl << endl;
 
+    
+    //---------------------------------------------------------------------------------------------------------------------------------------------------
+    // Computing BVH (on CPU)
+    //---------------------------------------------------------------------------------------------------------------------------------------------------
+
     vertices.positions = points.data();
     vertices.normals   = normals.data();
     vertices.colors    = colors.data();
+    vertices.uvs    = uvs.data();
     computeInfoForBVH(vertices, mesh, centroids, minboxes, maxboxes);
 
     cout << "BVH data computed" << endl;
@@ -389,20 +468,22 @@ int main ()
     BVHnode* BVH;
     int* BVHindices;
     
-    //cudaMalloc(&verts, vertices.size() * sizeof(Vertex));
     cudaMalloc(&scene, mesh.size() * sizeof(Triangle));
     cudaMalloc(&lights, lightsvec.size() * sizeof(Triangle));
     cudaMalloc(&BVH, bvhvec.size() * sizeof(BVHnode));
     cudaMalloc(&BVHindices, indvec.size() * sizeof(int));
 
-    //cudaMemcpy(verts, vertices.data(), vertices.size() * sizeof(Vertex), cudaMemcpyHostToDevice);
     cudaMemcpy(scene, mesh.data(), mesh.size() * sizeof(Triangle), cudaMemcpyHostToDevice);
     cudaMemcpy(lights, lightsvec.data(), lightsvec.size() * sizeof(Triangle), cudaMemcpyHostToDevice);
     cudaMemcpy(BVH, bvhvec.data(), bvhvec.size() * sizeof(BVHnode), cudaMemcpyHostToDevice);
     cudaMemcpy(BVHindices, indvec.data(), indvec.size() * sizeof(int), cudaMemcpyHostToDevice);
 
+    //---------------------------------------------------------------------------------------------------------------------------------------------------
+    // Launch GPU Code - goes to functions in deviceCode.cu
+    //---------------------------------------------------------------------------------------------------------------------------------------------------
+    
 
-    launch(maxDepth, mats_d ,BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, true, w, h, out_colors);
+    launch(maxDepth, mats_d, textures_d, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, true, w, h, out_colors);
 
     float4* host_colors = new float4[w * h];
     cudaMemcpy(host_colors, out_colors, w * h * sizeof(float4), cudaMemcpyDeviceToHost);
@@ -411,6 +492,14 @@ int main ()
     {
         for (int j = 0; j < h; j++)
         {
+            
+            if (host_colors[image.toIndex(i, j)].x < 0 || host_colors[image.toIndex(i, j)].y < 0 || host_colors[image.toIndex(i, j)].z < 0)
+                cout << i << ", " << j << " Negative color written: <" << host_colors[image.toIndex(i, j)].x << ", " << host_colors[image.toIndex(i, j)].y << ", " 
+                    << host_colors[image.toIndex(i, j)].z << ">"<< endl;
+            /*
+            if (host_colors[image.toIndex(i, j)].x > 1.0f || host_colors[image.toIndex(i, j)].y > 1.0f || host_colors[image.toIndex(i, j)].z > 1.0f)
+                cout << i << ", " << j << " Big color written: <" << host_colors[image.toIndex(i, j)].x << ", " << host_colors[image.toIndex(i, j)].y << ", " 
+                    << host_colors[image.toIndex(i, j)].z << ">"<< endl;*/
             image.setColor(i, j, host_colors[image.toIndex(i, j)]);
         }
         
@@ -423,6 +512,8 @@ int main ()
     cudaFree(lights);
     cudaFree(BVH);
     cudaFree(BVHindices);
+    cudaFree(mats_d);
+    cudaFree(textures_d);
     delete[] host_colors;
 
     std::string filename = "render.bmp";
@@ -445,8 +536,8 @@ int main ()
     
 }
 
-// Simple obj reading. no textures. Meant for flat shaded meshes.
-void readObjSimple(string filename, vector<float4>& points, vector<float4>& normals, vector<float4>& colors, vector<Triangle>& mesh, 
+
+void readObjSimple(string filename, vector<float4>& points, vector<float4>& normals, vector<float4>& colors, vector<float2>& uvs,vector<Triangle>& mesh, 
     vector<Triangle>& lights, float4 c, float4 e, int materialID)
 {
     std::ifstream file(filename);
@@ -456,11 +547,12 @@ void readObjSimple(string filename, vector<float4>& points, vector<float4>& norm
         return;
     }
     int startIndex = points.size();
-    int normalStartIndex = normals.size(); // <--- ADD THIS
+    int normalStartIndex = normals.size();
+    int uvStartIndex = uvs.size();
 
     std::string line;
     while (std::getline(file, line)) {
-        if (line.empty() || line[0] == '#') continue; // skip comments
+        if (line.empty() || line[0] == '#' || line[0] == 's') continue; // skip comments
 
         std::istringstream iss(line);
         std::string prefix;
@@ -474,7 +566,14 @@ void readObjSimple(string filename, vector<float4>& points, vector<float4>& norm
             float4 p = make_float4(x, y, z, 0.0f);
             points.push_back(p);
         }
-        else if (prefix == "vt") {}
+        else if (prefix == "vt") 
+        {
+            double u, v;
+            iss >> u >> v;
+
+            float2 uv = f2(u,1.0f-v);
+            uvs.push_back(uv);
+        }
         else if (prefix == "vn") {
             double x, y, z;
             iss >> x >> y >> z;
@@ -487,6 +586,10 @@ void readObjSimple(string filename, vector<float4>& points, vector<float4>& norm
             string vertinfo;
             vector<int> vertexIndices;
             vector<int> normalIndices;
+            vector<int> uvIndices;
+
+            bool hasUV = uvIndices.size() == vertexIndices.size();
+            bool hasN  = normalIndices.size() == vertexIndices.size();
             while (iss >> vertinfo) 
             {
                 istringstream vss(vertinfo);
@@ -499,7 +602,8 @@ void readObjSimple(string filename, vector<float4>& points, vector<float4>& norm
                 }
                 if (getline(vss, idx, '/'))
                 {
-
+                    if (!idx.empty())
+                        uvIndices.push_back(stoi(idx) - 1);
                 }
                 if (getline(vss, idx, '/'))
                 {
@@ -508,24 +612,31 @@ void readObjSimple(string filename, vector<float4>& points, vector<float4>& norm
                 }
             }
             int n = vertexIndices.size();
-            //int startIndex = points.size();
-
-            // Push all vertices directly into the main vector
-            //for (int i = 0; i < n; ++i) {
-            //    vertices.push_back(Vertex(points[vertexIndices[i]], c, normals[normalIndices[i]]));
-            //}
-
             // Triangulate the polygon as a fan from the first vertex
             for (int i = 1; i < n - 1; ++i) {
                 int idx0 = vertexIndices[0] + startIndex;
                 int idx1 = vertexIndices[i] + startIndex;
                 int idx2 = vertexIndices[i + 1] + startIndex;
 
+                /*
                 int n_idx0 = normalIndices[0] + normalStartIndex;
                 int n_idx1 = normalIndices[i] + normalStartIndex;
                 int n_idx2 = normalIndices[i + 1] + normalStartIndex;
 
-                Triangle tri(idx0, idx1, idx2, n_idx0, n_idx1, n_idx2, materialID, e);
+                int uv_idx0 = uvIndices[0] + uvStartIndex;
+                int uv_idx1 = uvIndices[i] + uvStartIndex;
+                int uv_idx2 = uvIndices[i + 1] + uvStartIndex;
+                */
+
+                int uv_idx0 = hasUV ? uvIndices[0] + uvStartIndex : -1;
+                int uv_idx1 = hasUV ? uvIndices[i] + uvStartIndex : -1;
+                int uv_idx2 = hasUV ? uvIndices[i + 1] + uvStartIndex : -1;
+
+                int n_idx0  = hasN ? normalIndices[0] + normalStartIndex : -1;
+                int n_idx1  = hasN ? normalIndices[i] + normalStartIndex : -1;
+                int n_idx2  = hasN ? normalIndices[i + 1] + normalStartIndex : -1;
+
+                Triangle tri(idx0, idx1, idx2, n_idx0, n_idx1, n_idx2, materialID, uv_idx0, uv_idx1, uv_idx2, e);
                 mesh.push_back(tri);
 
                 if (lengthSquared(e) > 0) {
@@ -533,11 +644,6 @@ void readObjSimple(string filename, vector<float4>& points, vector<float4>& norm
                 }
             }
         }
-    }
-
-    for (int i = startIndex; i < points.size(); i++)
-    {
-        colors.push_back(c);
     }
 
     file.close();
