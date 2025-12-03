@@ -426,8 +426,8 @@ __device__ void leaf_pdf(float ior, float currIOR, float roughness, float transm
         h = normalize(wi + wo);
         if (h.z < 0.0f) h = -h;
         
-        float nDotWi = wi.z;
-        float nDotWo = wo.z;
+        //float nDotWi = wi.z;
+        //float nDotWo = wo.z;
         float alpha = roughness * roughness;
 
         float D = D_GGX(h, alpha);

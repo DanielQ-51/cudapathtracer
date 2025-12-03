@@ -4,10 +4,11 @@
 #include <math.h>
 #include <iostream>
 #include <vector>
+#include <curand_kernel.h>
 using namespace std;
 
 __device__ __constant__ float EPSILON = 0.000001f;
-__device__ __constant__ float PI = 3.141592;
+__device__ __constant__ float PI = 3.141592f;
 
 inline __host__ __device__ __forceinline__ float4 f4(float x, float y, float z, float w = 0.0f) {
     return make_float4(x, y, z, w);
@@ -201,11 +202,11 @@ inline __host__ float surfaceArea(const float4& min, const float4& max)
     return 2.0f * (dx * dy + dx * dz + dy * dz);
 }
 
-__device__ __forceinline__ float4 sqrtf4(const float4& v) {
+__host__ __device__ __forceinline__ float4 sqrtf4(const float4& v) {
     return make_float4(sqrtf(v.x), sqrtf(v.y), sqrtf(v.z), 0.0f);
 }
 
-__device__ __forceinline__ float4 rotateX(const float4& v, float angle)
+__host__ __device__ __forceinline__ float4 rotateX(const float4& v, float angle)
 {
     float c = cosf(angle), s = sinf(angle);
     return f4(
@@ -215,7 +216,7 @@ __device__ __forceinline__ float4 rotateX(const float4& v, float angle)
     );
 }
 
-__device__ __forceinline__ float4 rotateY(const float4& v, float angle)
+__host__ __device__ __forceinline__ float4 rotateY(const float4& v, float angle)
 {
     float c = cosf(angle), s = sinf(angle);
     return f4(
@@ -225,7 +226,7 @@ __device__ __forceinline__ float4 rotateY(const float4& v, float angle)
     );
 }
 
-__device__ __forceinline__ float4 rotateZ(const float4& v, float angle)
+__host__ __device__ __forceinline__ float4 rotateZ(const float4& v, float angle)
 {
     float c = cosf(angle), s = sinf(angle);
     return f4(
@@ -233,4 +234,20 @@ __device__ __forceinline__ float4 rotateZ(const float4& v, float angle)
         v.x * s + v.y * c,
         v.z
     );
+}
+
+__device__ __forceinline__ float4 sampleSphere(curandState& localState, float R)
+{
+    float u = curand_uniform(&localState);
+    float v = curand_uniform(&localState);
+
+    float z = 1.0f - 2.0f * u;          // cos(theta) uniformly distributed
+    float r = sqrtf(max(0.f, 1.f - z*z));
+
+    float phi = 2.0f * 3.141592f * v;
+
+    float x = r * cosf(phi);
+    float y = r * sinf(phi);
+
+    return f4(R * x, R * y, R * z);
 }

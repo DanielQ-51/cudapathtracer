@@ -5,6 +5,7 @@
 #include "util.cuh"
 #include <numeric>
 #include <algorithm>
+#include <curand_kernel.h>
 
 struct BVHnode
 {
@@ -155,6 +156,8 @@ struct Triangle
     int materialID;
     float4 emission;
 
+    int lightInd;
+
     __host__ __device__ Triangle() {}
 
     __host__ __device__ Triangle(int a, int b, int c, int na, int nb, int nc, int mat, float4 e)
@@ -162,6 +165,9 @@ struct Triangle
 
     __host__ __device__ Triangle(int a, int b, int c, int na, int nb, int nc, int mat, int uva, int uvb, int uvc, float4 e)
         : aInd(a), bInd(b), cInd(c), naInd(na), nbInd(nb), ncInd(nc), materialID(mat), uvaInd(uva), uvbInd(uvb), uvcInd(uvc), emission(e) {}
+
+    __host__ __device__ Triangle(int a, int b, int c, int na, int nb, int nc, int mat, int uva, int uvb, int uvc, float4 e, int lind)
+        : aInd(a), bInd(b), cInd(c), naInd(na), nbInd(nb), ncInd(nc), materialID(mat), uvaInd(uva), uvbInd(uvb), uvcInd(uvc), emission(e), lightInd(lind){}
 };
 
 struct Ray
@@ -179,8 +185,148 @@ struct Ray
 
 struct Camera
 {
-    float4 origin;
-    float4 direction;
+    float4 cameraOrigin;
+    //float4 direction = f4(0.0f, 0.0f, -1.0f);
+    int w;
+    int h;
+
+    float xRot; // in radians
+    float yRot; // in radians
+    float zRot; // in radians
+
+    float aperture;
+    float focalDist;
+    //float imagePlaneDist; // for FOV
+    float fovScale;
+
+    float antiAliasJitterDist;
+
+    __host__ static Camera Pinhole(const float4& cameraOrigin, int w, int h, float xR, float yR, float zR, float FOV, float aajitter = 2.0f)
+    {
+        Camera c;
+
+        c.w = w;
+        c.h = h;
+
+        c.cameraOrigin = cameraOrigin;
+        c.fovScale = tanf((FOV * 0.5f) * (3.141592f / 180.0f));
+        c.xRot = xR * (3.14159265f / 180.0f);
+        c.yRot = yR * (3.14159265f / 180.0f);
+        c.zRot = zR * (3.14159265f / 180.0f);
+
+        c.aperture = 0.000001f;
+        c.focalDist = 1.0f/FOV;
+
+        c.antiAliasJitterDist = aajitter;
+
+        return c;
+    }
+
+    __host__ static Camera NotPinhole(const float4& cameraOrigin, int w, int h, float xR, float yR, float zR, float FOV, float aperture, float focalDist, float aajitter = 2.0f)
+    {
+        Camera c;
+
+        c.w = w;
+        c.h = h;
+
+        c.cameraOrigin = cameraOrigin;
+        c.fovScale = tanf((FOV * 0.5f) * (3.141592f / 180.0f));
+        c.xRot = xR * (3.14159265f / 180.0f);
+        c.yRot = yR * (3.14159265f / 180.0f);
+        c.zRot = zR * (3.14159265f / 180.0f);
+
+        c.aperture = aperture;
+        c.focalDist = focalDist;
+
+        c.antiAliasJitterDist = aajitter;
+
+        return c;
+    }
+
+    __device__ Ray generateCameraRay(curandState& localState, int x, int y)
+    {
+        Ray r;
+        float aspect = (float)w / (float)h;
+
+        // 1. Anti-Aliasing Jitter
+        // Use the struct variable, not hardcoded 0.5
+        float jitterX = (curand_uniform(&localState) - 0.5f) * antiAliasJitterDist;
+        float jitterY = (curand_uniform(&localState) - 0.5f) * antiAliasJitterDist;
+
+        // 2. Screen Space Coordinates
+        float u = (2.0f * ((x + jitterX) / (float)w) - 1.0f) * aspect * fovScale;
+        float v = (2.0f * ((y + jitterY) / (float)h) - 1.0f) * fovScale;
+
+        // 3. Calculate Focal Point on the PLANAR focus plane
+        // We create the vector in local space pointing to the focus plane.
+        // Since local Z is -1, multiplying by focalDist ensures the Z-depth is exactly focalDist.
+        // DO NOT NORMALIZE HERE.
+        float4 focalVectorLocal = f4(u * focalDist, v * focalDist, -focalDist);
+
+        // 4. Rotate Focal Vector to World Space
+        float4 focalVectorWorld = rotateX(focalVectorLocal, xRot);
+        focalVectorWorld = rotateY(focalVectorWorld, yRot);
+
+        // This is the specific point in world space where the ray must end up
+        float4 focalPoint = cameraOrigin + focalVectorWorld;
+
+        // 5. Sample the Lens (Aperture)
+        float4 lensOffset = f4(0.0f, 0.0f, 0.0f, 0.0f);
+        
+        if (aperture > 0.0f)
+        {
+            float r_rnd = curand_uniform(&localState); 
+            float theta = 2.0f * 3.141592f * curand_uniform(&localState);
+            
+            // Uniform disk sampling (sqrt for area preservation)
+            float radius = aperture * sqrtf(r_rnd);
+            float lensU = radius * cosf(theta);
+            float lensV = radius * sinf(theta);
+
+            // Re-calculate Basis vectors (Or better: store them in struct)
+            float4 baseRight = f4(1.0f, 0.0f, 0.0f);
+            float4 baseUp    = f4(0.0f, 1.0f, 0.0f);
+            
+            float4 camRight = rotateY(rotateX(baseRight, xRot), yRot);
+            float4 camUp    = rotateY(rotateX(baseUp, xRot), yRot);
+
+            lensOffset = (camRight * lensU) + (camUp * lensV);
+        }
+
+        // 6. Final Ray Construction
+        // Ray starts at the perturbed lens position
+        r.origin = cameraOrigin + lensOffset;
+        
+        // Ray points from perturbed origin towards the fixed focal point
+        r.direction = normalize(focalPoint - r.origin);
+
+        return r;
+    }
+
+    __host__ __device__ float4 getForwardVector() const
+    {
+        float4 localForward = f4(0.0f, 0.0f, -1.0f, 0.0f);
+
+        float4 worldForward = rotateX(localForward, xRot);
+        worldForward = rotateY(worldForward, yRot);
+
+        return normalize(worldForward);
+    }
+    
+};
+
+struct PathVertex {
+    int materialID;
+    float4 pt;
+    float4 n;
+    float4 wo;
+    float4 wi;
+    float4 beta; 
+    float pdfFwd;        
+    float pdfRev;        
+    bool isDelta;
+    bool isLight;
+    int lightInd;
 };
 
 struct Intersection
@@ -201,6 +347,11 @@ struct Intersection
     float dist;
 
     __device__ Intersection() {valid = false;};
+};
+
+enum IntegratorChoice {
+    UNIDIRECTIONAL = 0,
+    BIDIRECTIONAL = 1,
 };
 
 enum MaterialType {

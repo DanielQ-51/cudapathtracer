@@ -63,7 +63,7 @@ int partitionPrimitives(vector<int>& indices, vector<float4>& centroids, int sta
 void SAH( vector<int>& indices, vector<float4>& centroids, vector<float4>& AABBmins, vector<float4>& AABBmaxes, int start, 
     int end, int& axis, float4 minBound, float4 maxBound, float& splitPos, float& minCost, int& backup)
 {
-    const int numBuckets = 30;
+    const int numBuckets = 12;
     struct Bucket { float4 min, max; int count; };
     Bucket buckets[numBuckets];
     for (int i = 0; i < numBuckets; i++) 
@@ -237,13 +237,20 @@ int main ()
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     // Render Settings
     //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+    int integratorChoice = UNIDIRECTIONAL;
+
     int w = 3840;
     int h = 2160;
+    //int w = 1920;
+    //int h = 1080;
 
-    int sampleCount = 3000;
+    int sampleCount = 100;
     int maxDepth = 8;
-    int maxLeafSize = 2;
     
+    int maxLeafSize = 2; // max leaf size for the BVH
+
+    Camera camera = Camera::NotPinhole(f4(-0.5f, -0.55f, 2.4f), w, h, 15.0f, 25.0f, 0.0f, 36.9f, 0.015f, 2.15f);
 
     Image image = Image(w, h);
 
@@ -327,7 +334,6 @@ int main ()
     Material gold = Material::Metal(eta_gold, eta_gold, roughness_polished);
     Material steel = Material::Metal(eta_steel, eta_steel, roughness_rough);
 
-    float roughness = 0.05f;
     float ior = 1.5f;
 
     Material glass = Material::SmoothDielectric(ior, f4(0.0f), 1);
@@ -341,7 +347,7 @@ int main ()
 
     //Material leaf = Material::Leaf(1.5f, 0.6f, f4(0.8f, 0.25f, 0.28f), 0.2f);
     Material leaf = Material::Leaf(startIndices[2], widths[2], heights[2], 1.5f, 0.10f, f4(0.22f, 0.75f, 0.28f), 0.15f);
-    Material leafAutumn = Material::Leaf(startIndices[3], widths[3], heights[3], startIndices[5], widths[5], heights[5], 1.5f, 0.7f, f4(0.22f, 0.75f, 0.28f), 0.01f);
+    Material leafAutumn = Material::Leaf(startIndices[3], widths[3], heights[3], 1.5f, 0.8f, f4(0.22f, 0.75f, 0.28f), 0.6f);
     Material canopy = Material::Leaf(startIndices[2], widths[2], heights[2], 1.5f, 0.9f, f4(0.22f, 0.75f, 0.28f), 0.7f);
     Material leafStem = Material::Diffuse(f4(0.90f, 0.9f, 0.83f));
     Material sky = Material::Diffuse(f4(0.4f, 0.4f, 1.00f));
@@ -401,7 +407,7 @@ int main ()
     //readObjSimple("scenedata/lightbehindleaf.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 5.0f*f4(9.0f,9.0f,7.0f), 2);
     //readObjSimple("scenedata/backlight.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 1.5f*f4(6.0f,7.0f,7.0f), 2);
 
-    readObjSimple("scenedata/sun2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 300.0f*f4(10.0f,3.0f,2.0f), 2);
+    readObjSimple("scenedata/sun2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 350.0f*f4(15.0f,3.0f,2.0f), 2);
     //readObjSimple("scenedata/sunback.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f*f4(9.0f,6.0f,2.0f), 2);
     readObjSimple("scenedata/leavescomplex.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f*f4(9.0f,9.0f,7.0f), 13);
     readObjSimple("scenedata/branches.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f*f4(9.0f,9.0f,7.0f), 14);
@@ -457,6 +463,10 @@ int main ()
     int backupCt = 0;
     int startNode = buildBVH(bvhvec, indvec, centroids, minboxes, maxboxes, 0, mesh.size(), maxLeafSize, failcount, backupCt);
 
+    BVHnode root = bvhvec[0];
+    float4 sceneCenter = (root.aabbMAX + root.aabbMIN) * 0.5f;
+    float sceneRadius = length(root.aabbMAX - sceneCenter) + EPSILON;
+
     cout << "BVH built. Largest leaf is size: " << failcount << "." << " Backup was called "<< backupCt << " times." << endl;
     //printBVH(bvhvec, indvec);
     printBVHSummary(bvhvec);
@@ -479,11 +489,29 @@ int main ()
     cudaMemcpy(BVHindices, indvec.data(), indvec.size() * sizeof(int), cudaMemcpyHostToDevice);
 
     //---------------------------------------------------------------------------------------------------------------------------------------------------
+    // Additional setup according to which integrator is used
+    //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+    PathVertex* eyePath_d;
+    PathVertex* lightPath_d;
+
+    if (integratorChoice == BIDIRECTIONAL)
+    {
+        int pathBufferSize = w * h * maxDepth;
+
+        cudaMalloc(&eyePath_d, pathBufferSize * sizeof(PathVertex));
+        cudaMalloc(&lightPath_d, pathBufferSize * sizeof(PathVertex));
+    }
+    
+
+    //---------------------------------------------------------------------------------------------------------------------------------------------------
     // Launch GPU Code - goes to functions in deviceCode.cu
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     
-
-    launch(maxDepth, mats_d, textures_d, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, true, w, h, out_colors);
+    if (integratorChoice == UNIDIRECTIONAL)
+        launch_unidirectional(maxDepth, camera, mats_d, textures_d, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, true, w, h, out_colors);
+    else if (integratorChoice == BIDIRECTIONAL)
+        launch_bidirectional(maxDepth, camera, eyePath_d, lightPath_d, mats_d, textures_d, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, w, h, sceneCenter, sceneRadius, out_colors);
 
     float4* host_colors = new float4[w * h];
     cudaMemcpy(host_colors, out_colors, w * h * sizeof(float4), cudaMemcpyDeviceToHost);
@@ -496,10 +524,6 @@ int main ()
             if (host_colors[image.toIndex(i, j)].x < 0 || host_colors[image.toIndex(i, j)].y < 0 || host_colors[image.toIndex(i, j)].z < 0)
                 cout << i << ", " << j << " Negative color written: <" << host_colors[image.toIndex(i, j)].x << ", " << host_colors[image.toIndex(i, j)].y << ", " 
                     << host_colors[image.toIndex(i, j)].z << ">"<< endl;
-            /*
-            if (host_colors[image.toIndex(i, j)].x > 1.0f || host_colors[image.toIndex(i, j)].y > 1.0f || host_colors[image.toIndex(i, j)].z > 1.0f)
-                cout << i << ", " << j << " Big color written: <" << host_colors[image.toIndex(i, j)].x << ", " << host_colors[image.toIndex(i, j)].y << ", " 
-                    << host_colors[image.toIndex(i, j)].z << ">"<< endl;*/
             image.setColor(i, j, host_colors[image.toIndex(i, j)]);
         }
         
@@ -514,6 +538,8 @@ int main ()
     cudaFree(BVHindices);
     cudaFree(mats_d);
     cudaFree(textures_d);
+    cudaFree(eyePath_d);
+    cudaFree(lightPath_d);
     delete[] host_colors;
 
     std::string filename = "render.bmp";
@@ -549,6 +575,8 @@ void readObjSimple(string filename, vector<float4>& points, vector<float4>& norm
     int startIndex = points.size();
     int normalStartIndex = normals.size();
     int uvStartIndex = uvs.size();
+
+    int nextLightIndex = lights.size();
 
     std::string line;
     while (std::getline(file, line)) {
@@ -614,19 +642,11 @@ void readObjSimple(string filename, vector<float4>& points, vector<float4>& norm
             int n = vertexIndices.size();
             // Triangulate the polygon as a fan from the first vertex
             for (int i = 1; i < n - 1; ++i) {
+                bool isLight = lengthSquared(e) > 0;
+
                 int idx0 = vertexIndices[0] + startIndex;
                 int idx1 = vertexIndices[i] + startIndex;
                 int idx2 = vertexIndices[i + 1] + startIndex;
-
-                /*
-                int n_idx0 = normalIndices[0] + normalStartIndex;
-                int n_idx1 = normalIndices[i] + normalStartIndex;
-                int n_idx2 = normalIndices[i + 1] + normalStartIndex;
-
-                int uv_idx0 = uvIndices[0] + uvStartIndex;
-                int uv_idx1 = uvIndices[i] + uvStartIndex;
-                int uv_idx2 = uvIndices[i + 1] + uvStartIndex;
-                */
 
                 int uv_idx0 = hasUV ? uvIndices[0] + uvStartIndex : -1;
                 int uv_idx1 = hasUV ? uvIndices[i] + uvStartIndex : -1;
@@ -636,11 +656,16 @@ void readObjSimple(string filename, vector<float4>& points, vector<float4>& norm
                 int n_idx1  = hasN ? normalIndices[i] + normalStartIndex : -1;
                 int n_idx2  = hasN ? normalIndices[i + 1] + normalStartIndex : -1;
 
-                Triangle tri(idx0, idx1, idx2, n_idx0, n_idx1, n_idx2, materialID, uv_idx0, uv_idx1, uv_idx2, e);
+                Triangle tri;
+                if (isLight)
+                    tri = Triangle(idx0, idx1, idx2, n_idx0, n_idx1, n_idx2, materialID, uv_idx0, uv_idx1, uv_idx2, e, nextLightIndex);
+                else
+                    tri = Triangle(idx0, idx1, idx2, n_idx0, n_idx1, n_idx2, materialID, uv_idx0, uv_idx1, uv_idx2, e, -51);
                 mesh.push_back(tri);
 
                 if (lengthSquared(e) > 0) {
                     lights.push_back(tri);
+                    nextLightIndex++;
                 }
             }
         }

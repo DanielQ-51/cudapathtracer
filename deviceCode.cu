@@ -157,7 +157,7 @@ __device__ void BVHSceneIntersect(const Ray& r, BVHnode* BVH, int* BVHindices, V
                     intersect.materialID = tri->materialID;
                     intersect.emission = tri->emission;
                     intersect.valid = true;
-                    intersect.tri = *tri;
+                    intersect.tri = *tri; // could be bad for performance
 
                     intersect.dist = t;
                 }
@@ -471,7 +471,31 @@ __device__ void removeMaterialFromStack(int* stack, int* stackTop, int materialI
     }
 }
 
-__global__ void Li_unidirectional (curandState* rngStates, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, int maxDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
+__device__ float4 sampleSky(float4 direction)
+{
+    float4 unit_dir = normalize(direction); 
+
+    float t = 0.5f * (unit_dir.y + 1.0f);
+
+    //float4 c_horizon = 2.2f* f4(1.0f, 0.8f, 0.2f);
+    //float4 c_zenith  = f4(0.4f, 0.4f, 0.8f);
+    float4 c_horizon = 1.0f * f4(1.0f, 0.4f, 0.2f);
+    float4 c_zenith  = f4(0.3f, 0.4f, 0.8f);
+
+    float4 sky_color = (1.0f - t) * c_horizon + t * c_zenith;
+
+    float4 sun_dir = normalize(f4(-0.45f, 0.05f, 0.866f)); 
+    float sun_focus = 800.0f;
+    float sun_intensity = 15.0f;
+    float4 sun_base = f4(1.0f, 0.8f, 0.2f);
+
+    float sun_factor = pow(max(0.0f, dot(unit_dir, sun_dir)), sun_focus);
+    float4 sun_final = sun_base * sun_intensity * sun_factor;
+
+    return sky_color + sun_final;
+}
+
+__global__ void Li_unidirectional (curandState* rngStates, Camera camera, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, int maxDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
     Triangle* lights, int lightNum, int numSample, bool useMIS, int w, int h, float4* colors)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -500,53 +524,7 @@ __global__ void Li_unidirectional (curandState* rngStates, Material* materials, 
         int stackTop = 0;
         mediumStack[stackTop++] = 0; //index of AIR (IOR 1.0f, Priority 99)
 
-        float xRot = 15.0f * (3.14159265f / 180.0f);
-        float yRot = 25.0f * (3.14159265f / 180.0f);
-
-        float aperture = 0.010f;      // lens radius, controls blur
-        float focalDist = 2.15f;      // distance at which things are perfectly in focus
-
-        float jitterX = 2.0f * curand_uniform(&localState) - 1.0f;
-        float jitterY = 2.0f * curand_uniform(&localState) - 1.0f;
-        float nx = (x + jitterX - w * 0.5f) / w;
-        float ny = (y + jitterY - h * 0.5f) / h;
-
-        //float4 cameraOrigin = f4(-0.8f, -0.05f, 2.4f);
-        float4 cameraOrigin = f4(-0.5f, -0.55f, 2.4f);
-        //float4 cameraOrigin = f4(-0.8f, 3.5f, 3.0f);
-        float aspect = (float)w / (float)h;
-
-        // Compute point on image plane (as before)
-        float4 pixelPos = f4(cameraOrigin.x + nx * aspect,
-                            cameraOrigin.y + ny,
-                            cameraOrigin.z - 1.5f);
-
-        // Compute initial ray from pinhole (for focal point calculation)
-        float4 dir = pixelPos - cameraOrigin;
-        dir = rotateX(dir, xRot);
-        dir = rotateY(dir, yRot);
-        float4 rayDir = normalize(dir);
-
-        // Focal point along ray
-        float4 focalPoint = cameraOrigin + rayDir * focalDist;
-
-        // --- Sample point on lens ---
-        float rad = sqrt(curand_uniform(&localState)) * aperture;
-        float theta = 2.0f * 3.14159265f * curand_uniform(&localState);
-        float lensX = rad * cosf(theta);
-        float lensY = rad * sinf(theta);
-
-        // Build camera basis vectors (assuming Z-forward, Y-up)
-        float4 right = f4(1.0f, 0.0f, 0.0f);  // camera right
-        float4 up = f4(0.0f, 1.0f, 0.0f);     // camera up
-
-        // New ray origin on lens
-        r.origin = cameraOrigin + lensX * right + lensY * up;
-
-        // New ray direction through focal point
-        r.direction = normalize(focalPoint - r.origin);
-
-
+        r = camera.generateCameraRay(localState, x, y);
 
         float pdf = EPSILON;
         float etaI = EPSILON;
@@ -559,20 +537,18 @@ __global__ void Li_unidirectional (curandState* rngStates, Material* materials, 
             
             Intersection intersect = Intersection();
             intersect.valid = false;
-            //sceneIntersection(r, vertices, scene, triNum, intersect);
-            //BVHSceneIntersect(r, BVH, BVHindices, vertices, scene, intersect, 999999.0f, false, -1);
-            BVHSceneIntersect(r, BVH, BVHindices, vertices, scene, intersect, 999999.0f, false, previousintersectANY.triIDX);
+            //BVHSceneIntersect(r, BVH, BVHindices, vertices, scene, intersect, 999999.0f, false, previousintersectANY.triIDX);
+            BVHSceneIntersect(r, BVH, BVHindices, vertices, scene, intersect, 999999.0f, false);
 
             if (!intersect.valid) 
             {
-                float4 bg = f4(0.95f, 0.95f, 1.0f);
-                Li += beta * bg;
+                Li += beta * sampleSky(r.direction);
                 break;
             }
             
             int materialID = intersect.materialID;
 
-            float4 old_wi_local = wi_local;
+            //float4 old_wi_local = wi_local;
 
             toLocal(r.direction, intersect.normal, wi_local); // assign new wi_local
             wi_world = normalize(r.direction);
@@ -786,7 +762,7 @@ __global__ void Li_unidirectional (curandState* rngStates, Material* materials, 
     rngStates[pixelIdx] = localState;
 }
 
-__host__ void launch_unidirectional(int maxDepth, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
+__host__ void launch_unidirectional(int maxDepth, Camera camera, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
     Triangle* lights, int lightNum, int numSample, bool useMIS, int w, int h, float4* colors)
 {
     dim3 blockSize(16, 16);  
@@ -798,7 +774,7 @@ __host__ void launch_unidirectional(int maxDepth, Material* materials, float4* t
     initRNG<<<gridSize, blockSize>>>(d_rngStates, w, h, seed);
     cudaDeviceSynchronize();
 
-    Li_unidirectional<<<gridSize, blockSize>>>(d_rngStates, materials, textures, BVH, BVHindices, maxDepth, vertices, vertNum, scene, triNum, 
+    Li_unidirectional<<<gridSize, blockSize>>>(d_rngStates, camera, materials, textures, BVH, BVHindices, maxDepth, vertices, vertNum, scene, triNum, 
         lights, lightNum, numSample, useMIS, w, h, colors);
 
     cudaDeviceSynchronize();
@@ -806,11 +782,435 @@ __host__ void launch_unidirectional(int maxDepth, Material* materials, float4* t
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        std::cerr << "CUDA Error code: " << static_cast<int>(err) << std::endl;
+        std::cerr << "RENDER ERROR: CUDA Error code: " << static_cast<int>(err) << std::endl;
         // only call this if the code isn't catastrophic
         if (err != cudaErrorAssert && err != cudaErrorUnknown)
             std::cerr << cudaGetErrorString(err) << std::endl;
     }
     else
-        std::cout << "no cuda error" << std::endl;
+        std::cout << "Render executed with no CUDA error" << std::endl;
+}
+
+inline __device__ __forceinline__ int pathBufferIdx(int w, int x, int y, int depth, int maxDepth)
+{
+    return (y * w + x) * maxDepth + depth;
+}
+
+__device__ void generateEyePath(curandState& localState, Camera camera, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, int maxDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
+    Triangle* lights, int lightNum, int w, int h, int x, int y, PathVertex* eyePath, int& pathLength) 
+{
+    pathLength = 1;
+    Ray r = camera.generateCameraRay(localState, x, y);
+    float prevPDF_solidAngle; // outgoing pdf from scattering functions
+    float prev_cosine; // the previous cosine between the normal and the outgoing ray
+    int firstIdx = pathBufferIdx(w, x, y, 0, maxDepth);
+    
+    eyePath[firstIdx].pt = r.origin;
+    eyePath[firstIdx].n = camera.getForwardVector();
+    eyePath[firstIdx].wo = -r.direction;
+    eyePath[firstIdx].beta = f4(1.0f);
+    eyePath[firstIdx].pdfRev = 0.0f;
+    eyePath[firstIdx].pdfFwd = 1.0f;
+    eyePath[firstIdx].isDelta = true;
+
+    eyePath[firstIdx].isLight = false;
+    eyePath[firstIdx].lightInd = -51;
+
+    prevPDF_solidAngle = 1.0f; // since its a delta (for now)
+    prev_cosine = fabsf(dot(eyePath[firstIdx].n, normalize(r.direction)));
+
+    for (int depth = 1; depth < maxDepth; depth++)
+    {
+        int currIdx = pathBufferIdx(w, x, y, depth, maxDepth);
+        int prevIdx = pathBufferIdx(w, x, y, depth-1, maxDepth);
+        Intersection intersect = Intersection();
+        intersect.valid = false;
+        BVHSceneIntersect(r, BVH, BVHindices, vertices, scene, intersect);
+
+        if (!intersect.valid) // treat this as an endpoint
+        {
+            float R_env = 1000.0f;
+            float distSQR = R_env * R_env;
+            
+            eyePath[currIdx].pt = r.origin + r.direction * R_env;
+            eyePath[currIdx].n = -r.direction;
+            eyePath[currIdx].lightInd = -1; // Mark as sky
+            eyePath[currIdx].isLight = true;
+            
+            eyePath[currIdx].pdfFwd = prevPDF_solidAngle / distSQR; 
+            eyePath[currIdx].pdfRev = (1.0f / (4.0f * PI)) * prev_cosine / distSQR; // Assuming uniform sky sampling
+            
+            // we dont set beta here
+            
+            pathLength++;
+            break;
+        }
+
+        eyePath[currIdx].pt = intersect.point;
+        eyePath[currIdx].n = intersect.normal;
+        eyePath[currIdx].wo = normalize(-r.direction);
+
+        float4 wo_world = intersect.point - eyePath[prevIdx].pt; // the incoming direction, pointing at the new surface
+        float4 wo_local; // the incoming direction to the current path vertex. we use this for the cosine in the pdf conversion
+        toLocal(r.direction, intersect.normal, wo_local);
+
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // calculate forward pdf (previous vertex to current)
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        float distanceSQR = lengthSquared(wo_world);
+
+        // previous pdf (solid angle) * abs of dot product of current normal with incoming direction into the current surface divided by distance squared
+        float pdfFwd_area = prevPDF_solidAngle * fabsf(wo_local.z) / distanceSQR;
+        eyePath[currIdx].pdfFwd = pdfFwd_area; // pdf of going from the previous vertex to the current
+
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // Scatter to next vertex
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        float pdfFwd_solidAngle;
+        float4 f_val;
+        float4 wi_local; //okay apparently wi is the outgoing direction now wtf
+
+        float etaI = 1.0f; // TEMPORARY, CHANGE AFTER IMPLEMENTING PRIORITY NESTED DIELECTRICS
+        float etaT = 1.0f;
+
+        sample_f_eval(localState, materials, intersect.materialID, textures, wo_local, etaI, etaT, intersect.backface, wi_local, f_val, pdfFwd_solidAngle, intersect.uv);
+
+        prevPDF_solidAngle = pdfFwd_solidAngle; // update the prev pdf
+        
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // calculate backwards pdf (current vertex to previous)
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        float4 nextToCurrent_local = -wi_local;
+        float4 currentToPrev_local = -wo_local;
+
+        float pdfRev_solidAngle;
+        pdf_eval(materials, intersect.materialID, textures, nextToCurrent_local, currentToPrev_local, etaI, etaT, pdfRev_solidAngle, intersect.uv);
+
+        float pdfRev_area = pdfRev_solidAngle * prev_cosine / distanceSQR;
+        eyePath[currIdx].pdfRev = pdfRev_area;
+
+        prev_cosine = fabsf(wi_local.z); // update the prev cosine
+
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // Wrapping it up, self explanatory
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        float4 wi_world;
+        toWorld(wi_local, intersect.normal, wi_world);
+        eyePath[currIdx].wi = wi_world;
+
+        eyePath[currIdx].isDelta = materials[intersect.materialID].isSpecular;
+
+        if (lengthSquared(intersect.tri.emission) > EPSILON)
+        {
+            eyePath[currIdx].isLight = true;
+            eyePath[currIdx].lightInd = intersect.tri.lightInd;
+        }
+        else
+        {
+            eyePath[currIdx].isLight = false;
+            eyePath[currIdx].lightInd = -51; // -1 is reserved for the sun
+        }
+
+        if (pdfFwd_solidAngle < EPSILON)
+            break;
+
+        eyePath[currIdx].beta = eyePath[prevIdx].beta * f_val * fabsf(wi_local.z) / pdfFwd_solidAngle;
+
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // Set up next interaction
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        r.origin = intersect.point + wi_world * 0.001;
+        r.direction = wi_world;
+
+        pathLength++;
+    }
+}
+
+
+__device__ void generateFirstLightPathVertex(curandState& localState, int maxDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
+    Triangle* lights, int lightNum, int w, int h, int x, int y, float4 sceneCenter, float sceneRadius, PathVertex* lightPath, float& pdf_solidAngle, float& cosine) 
+{
+    int totalLightNum = lightNum + 1; // +1 for the sky
+    int firstIdx = pathBufferIdx(w, x, y, 0, maxDepth);
+    int lightInd = min(static_cast<int>(curand_uniform(&localState) * totalLightNum), totalLightNum - 1) - 1; // -1 to align it with the convention where -1 is the sky
+    
+    float pdf_chooseLight = 1.0f / (float)totalLightNum;
+    
+    if (lightInd != -1)
+    {
+        Triangle l = lights[lightInd];
+        float4 apos = vertices->positions[l.aInd];
+        float4 bpos = vertices->positions[l.bInd];
+        float4 cpos = vertices->positions[l.cInd];
+
+        float4 anorm = vertices->normals[l.naInd];
+        float4 bnorm = vertices->normals[l.nbInd];
+        float4 cnorm = vertices->normals[l.ncInd];
+
+        float u = sqrtf(curand_uniform(&localState));
+        float v = curand_uniform(&localState);
+
+        float w0 = (1.0f - u);
+        float w1 = u * (1.0f - v);
+        float w2 = u * v;
+
+        lightPath[firstIdx].pt = w0 * apos + w1 * bpos + w2 * cpos;
+        lightPath[firstIdx].n = normalize(w0 * anorm + w1 * bnorm + w2 * cnorm);
+
+        float4 dummy;
+        float firstPDF_solidAngle;
+        float4 outOfLight_world;
+
+        float4 outOfLight_local; 
+        cosine_sample_f(localState, dummy, outOfLight_local, dummy, firstPDF_solidAngle);
+        toWorld(outOfLight_local, lightPath[firstIdx].n ,outOfLight_world);
+
+        lightPath[firstIdx].wo = f4(0.0f); // degenerate vector, does not exist
+        lightPath[firstIdx].wi = outOfLight_world; // degenerate vector, does not exist
+
+        float area = 0.5f * length(cross3(bpos - apos, cpos - apos));
+        float pdf_samplePoint = 1.0f / area;
+        lightPath[firstIdx].pdfFwd = pdf_chooseLight * pdf_samplePoint;
+        lightPath[firstIdx].pdfRev = 0.0f;
+
+        float4 Le = l.emission;
+        lightPath[firstIdx].beta = (Le * PI) / lightPath[firstIdx].pdfFwd;
+
+        lightPath[firstIdx].lightInd = lightInd;
+        lightPath[firstIdx].isLight = true;
+        lightPath[firstIdx].isDelta = false;
+
+        pdf_solidAngle = firstPDF_solidAngle;
+        cosine = fabsf(outOfLight_local.z);
+    }
+    else
+    {
+        float4 dir_in = -sampleSphere(localState, 1.0f);
+        float pdf_dir = 1.0f / (4.0f * PI);
+
+        // some dark magic idk
+        float4 tangent;
+        float4 bitangent;
+
+        if (fabsf(dir_in.x) > 0.9f) 
+        {
+            float4 worldY = f4(0.0f, 1.0f, 0.0f);
+            tangent = normalize(cross3(worldY, dir_in));
+        } 
+        else 
+        {
+            float4 worldX = f4(1.0f, 0.0f, 0.0f);
+            tangent = normalize(cross3(worldX, dir_in));
+        }
+
+        bitangent = normalize(cross3(dir_in, tangent));
+
+        float r1 = curand_uniform(&localState);
+        float r2 = curand_uniform(&localState);
+        
+        float disk_r = sceneRadius * sqrtf(r1); 
+        float disk_phi = 2.0f * PI * r2;
+
+        float u_offset = disk_r * cosf(disk_phi);
+        float v_offset = disk_r * sinf(disk_phi);
+
+        float4 p_disk = sceneCenter + (tangent * u_offset) + (bitangent * v_offset);
+        float4 p_world = p_disk - (dir_in * 1000.0f);
+        float pdf_pos = 1.0f / (PI * sceneRadius * sceneRadius);
+
+        lightPath[firstIdx].pt = p_world;
+        lightPath[firstIdx].n = dir_in;
+
+        lightPath[firstIdx].wo = f4(0.0f); // degenerate vector, does not exist
+        lightPath[firstIdx].wi = dir_in;
+
+        lightPath[firstIdx].isLight = true;
+        lightPath[firstIdx].lightInd = -1; // the sky
+        lightPath[firstIdx].isDelta = false; // the sky
+
+        lightPath[firstIdx].pdfRev = 0.0f;
+        lightPath[firstIdx].pdfFwd = pdf_chooseLight * pdf_pos * pdf_dir;
+        
+        float4 Le = sampleSky(-dir_in);
+        lightPath[firstIdx].beta = Le / lightPath[firstIdx].pdfFwd;
+
+        pdf_solidAngle = pdf_dir;
+        cosine = 1.0f;
+    }
+}
+
+__device__ void generateLightPath(curandState& localState, Camera camera, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, int maxDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
+    Triangle* lights, int lightNum, int w, int h, int x, int y, float4 sceneCenter, float sceneRadius, PathVertex* lightPath, int& pathLength) 
+{
+    pathLength = 1;
+    int firstIdx = pathBufferIdx(w, x, y, 0, maxDepth);
+    Ray r;
+    float prevPDF_solidAngle; // outgoing pdf from scattering functions
+    float prev_cosine; // the previous cosine between the normal and the outgoing ray
+
+    generateFirstLightPathVertex(localState, maxDepth, vertices, vertNum, scene, triNum, lights, lightNum, w, h, x, y, sceneCenter, sceneRadius, lightPath, prevPDF_solidAngle, prev_cosine);
+
+    r.origin = lightPath[firstIdx].pt + lightPath[firstIdx].wi * EPSILON;
+    r.direction = lightPath[firstIdx].wi;
+
+    for (int depth = 1; depth < maxDepth; depth++)
+    {
+        int currIdx = pathBufferIdx(w, x, y, depth, maxDepth);
+        int prevIdx = pathBufferIdx(w, x, y, depth-1, maxDepth);
+
+        Intersection intersect = Intersection();
+        intersect.valid = false;
+        BVHSceneIntersect(r, BVH, BVHindices, vertices, scene, intersect);
+
+        if (!intersect.valid)
+            break;
+
+        lightPath[currIdx].pt = intersect.point;
+        lightPath[currIdx].n = intersect.normal;
+        lightPath[currIdx].wo = normalize(-r.direction);
+
+        float4 wo_world = intersect.point - lightPath[prevIdx].pt; // the incoming direction, pointing at the new surface
+        float4 wo_local; // the incoming direction to the current path vertex. we use this for the cosine in the pdf conversion
+        toLocal(r.direction, intersect.normal, wo_local);
+
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // calculate forward pdf (previous vertex to current)
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        float distanceSQR = lengthSquared(wo_world);
+
+        // previous pdf (solid angle) * abs of dot product of current normal with incoming direction into the current surface divided by distance squared
+        float pdfFwd_area = prevPDF_solidAngle * fabsf(wo_local.z) / distanceSQR;
+        lightPath[currIdx].pdfFwd = pdfFwd_area; // pdf of going from the previous vertex to the current
+
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // Scatter to next vertex
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        float pdfFwd_solidAngle;
+        float4 f_val;
+        float4 wi_local; //okay apparently wi is the outgoing direction now wtf
+
+        float etaI = 1.0f; // TEMPORARY, CHANGE AFTER IMPLEMENTING PRIORITY NESTED DIELECTRICS
+        float etaT = 1.0f;
+
+        sample_f_eval(localState, materials, intersect.materialID, textures, wo_local, etaI, etaT, intersect.backface, wi_local, f_val, pdfFwd_solidAngle, intersect.uv);
+
+        if (intersect.materialID == MAT_SMOOTHDIELECTRIC) // If this is glass/water
+        {
+            bool transmitted = (wi_local.z > 0) != (wo_local.z > 0); 
+
+            if (transmitted) {
+                float correction = (etaT * etaT) / (etaI * etaI);
+                
+                f_val *= correction;
+            }
+        }
+
+        prevPDF_solidAngle = pdfFwd_solidAngle; // update the prev pdf
+        
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // calculate backwards pdf (current vertex to previous)
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        float4 nextToCurrent_local = -wi_local;
+        float4 currentToPrev_local = -wo_local;
+
+        float pdfRev_solidAngle;
+        pdf_eval(materials, intersect.materialID, textures, nextToCurrent_local, currentToPrev_local, etaI, etaT, pdfRev_solidAngle, intersect.uv);
+
+        float pdfRev_area = pdfRev_solidAngle * prev_cosine / distanceSQR;
+        lightPath[currIdx].pdfRev = pdfRev_area;
+
+        prev_cosine = fabsf(wi_local.z); // update the prev cosine
+
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // Wrapping it up, self explanatory
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        float4 wi_world;
+        toWorld(wi_local, intersect.normal, wi_world);
+        lightPath[currIdx].wi = wi_world;
+        lightPath[currIdx].isDelta = materials[intersect.materialID].isSpecular;
+
+        if (lengthSquared(intersect.tri.emission) > EPSILON)
+        {
+            lightPath[currIdx].isLight = true;
+            lightPath[currIdx].lightInd = intersect.tri.lightInd;
+        }
+        else
+        {
+            lightPath[currIdx].isLight = false;
+            lightPath[currIdx].lightInd = -51; // -1 is reserved for the sun
+        }
+
+        if (pdfFwd_solidAngle < EPSILON)
+            break;
+
+        lightPath[currIdx].beta = lightPath[prevIdx].beta * f_val * fabsf(wi_local.z) / pdfFwd_solidAngle;
+
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // Set up next interaction
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        r.origin = intersect.point + wi_world * 0.001;
+        r.direction = wi_world;
+
+        pathLength++;
+    }
+}
+
+__global__ void Li_bidirectional(curandState* rngStates, Camera camera, PathVertex* eyePath, PathVertex* lightPath, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, 
+    int maxDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, Triangle* lights, int lightNum, int numSample, int w, int h, float4 sceneCenter, float sceneRadius, float4* colors) 
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= w || y >= h) return;
+    int pixelIdx = y*w + x;
+    
+    float4 colorSum = f4();
+    curandState localState = rngStates[pixelIdx];
+
+    for (int currSample = 0; currSample < numSample; currSample++)
+    {
+        int eyePathLength = 0; // measures number of pathvertices, not segments
+        int lightPathLength = 0; // measures number of pathvertices, not segments
+
+        generateEyePath(localState, camera, materials, textures, BVH, BVHindices, maxDepth, vertices, vertNum, scene, triNum, lights, lightNum, w, h, x, y, eyePath, eyePathLength);
+        
+    }
+}
+
+__host__ void launch_bidirectional(int maxDepth, Camera camera, PathVertex* eyePath, PathVertex* lightPath, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
+    Triangle* lights, int lightNum, int numSample, int w, int h, float4 sceneCenter, float sceneRadius, float4* colors)
+{
+    dim3 blockSize(16, 16);  
+    dim3 gridSize((w+15)/16, (h+15)/16);
+    curandState* d_rngStates;
+    cudaMalloc(&d_rngStates, w * h * sizeof(curandState));
+
+    unsigned long seed = 103033UL;
+    initRNG<<<gridSize, blockSize>>>(d_rngStates, w, h, seed);
+    cudaDeviceSynchronize();
+
+    Li_bidirectional<<<gridSize, blockSize>>>(d_rngStates, camera, eyePath, lightPath, materials, textures, BVH, BVHindices, maxDepth, vertices, vertNum, scene, triNum, 
+        lights, lightNum, numSample, w, h, sceneCenter, sceneRadius, colors);
+
+    cudaDeviceSynchronize();
+    cudaFree(d_rngStates);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "RENDER ERROR: CUDA Error code: " << static_cast<int>(err) << std::endl;
+        // only call this if the code isn't catastrophic
+        if (err != cudaErrorAssert && err != cudaErrorUnknown)
+            std::cerr << cudaGetErrorString(err) << std::endl;
+    }
+    else
+        std::cout << "Render executed with no CUDA error" << std::endl;
 }
