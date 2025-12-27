@@ -157,6 +157,7 @@ struct Triangle
     float4 emission;
 
     int lightInd;
+    int triInd;
 
     __host__ __device__ Triangle() {}
 
@@ -166,8 +167,8 @@ struct Triangle
     __host__ __device__ Triangle(int a, int b, int c, int na, int nb, int nc, int mat, int uva, int uvb, int uvc, float4 e)
         : aInd(a), bInd(b), cInd(c), naInd(na), nbInd(nb), ncInd(nc), materialID(mat), uvaInd(uva), uvbInd(uvb), uvcInd(uvc), emission(e) {}
 
-    __host__ __device__ Triangle(int a, int b, int c, int na, int nb, int nc, int mat, int uva, int uvb, int uvc, float4 e, int lind)
-        : aInd(a), bInd(b), cInd(c), naInd(na), nbInd(nb), ncInd(nc), materialID(mat), uvaInd(uva), uvbInd(uvb), uvcInd(uvc), emission(e), lightInd(lind){}
+    __host__ __device__ Triangle(int a, int b, int c, int na, int nb, int nc, int mat, int uva, int uvb, int uvc, float4 e, int lind, int tind)
+        : aInd(a), bInd(b), cInd(c), naInd(na), nbInd(nb), ncInd(nc), materialID(mat), uvaInd(uva), uvbInd(uvb), uvcInd(uvc), emission(e), lightInd(lind), triInd(tind){}
 };
 
 struct Ray
@@ -201,6 +202,10 @@ struct Camera
 
     float antiAliasJitterDist;
 
+    float4 forward;
+    float4 right;
+    float4 up;
+
     __host__ static Camera Pinhole(const float4& cameraOrigin, int w, int h, float xR, float yR, float zR, float FOV, float aajitter = 2.0f)
     {
         Camera c;
@@ -218,6 +223,8 @@ struct Camera
         c.focalDist = 1.0f/FOV;
 
         c.antiAliasJitterDist = aajitter;
+
+        c.preCompute();
 
         return c;
     }
@@ -240,37 +247,31 @@ struct Camera
 
         c.antiAliasJitterDist = aajitter;
 
+        c.preCompute();
         return c;
     }
 
+
+    // returns a camera ray with normalized direction
     __device__ Ray generateCameraRay(curandState& localState, int x, int y)
     {
         Ray r;
         float aspect = (float)w / (float)h;
 
-        // 1. Anti-Aliasing Jitter
-        // Use the struct variable, not hardcoded 0.5
+        // 1. Anti-Aliasing & Screen Coords
         float jitterX = (curand_uniform(&localState) - 0.5f) * antiAliasJitterDist;
         float jitterY = (curand_uniform(&localState) - 0.5f) * antiAliasJitterDist;
 
-        // 2. Screen Space Coordinates
         float u = (2.0f * ((x + jitterX) / (float)w) - 1.0f) * aspect * fovScale;
         float v = (2.0f * ((y + jitterY) / (float)h) - 1.0f) * fovScale;
 
-        // 3. Calculate Focal Point on the PLANAR focus plane
-        // We create the vector in local space pointing to the focus plane.
-        // Since local Z is -1, multiplying by focalDist ensures the Z-depth is exactly focalDist.
-        // DO NOT NORMALIZE HERE.
-        float4 focalVectorLocal = f4(u * focalDist, v * focalDist, -focalDist);
+        // 2. Calculate Focal Point using Precomputed Basis Vectors
+        // This automatically handles X, Y, and Z rotation correctly.
+        // Note: 'forward' corresponds to local (0,0,-1), so we move positive along 'forward'
+        // to go deeper into the scene.
+        float4 focalPoint = cameraOrigin + (right * (u * focalDist)) + (up * (v * focalDist)) + (forward * focalDist);
 
-        // 4. Rotate Focal Vector to World Space
-        float4 focalVectorWorld = rotateX(focalVectorLocal, xRot);
-        focalVectorWorld = rotateY(focalVectorWorld, yRot);
-
-        // This is the specific point in world space where the ray must end up
-        float4 focalPoint = cameraOrigin + focalVectorWorld;
-
-        // 5. Sample the Lens (Aperture)
+        // 3. Sample the Lens (Aperture)
         float4 lensOffset = f4(0.0f, 0.0f, 0.0f, 0.0f);
         
         if (aperture > 0.0f)
@@ -278,56 +279,250 @@ struct Camera
             float r_rnd = curand_uniform(&localState); 
             float theta = 2.0f * 3.141592f * curand_uniform(&localState);
             
-            // Uniform disk sampling (sqrt for area preservation)
             float radius = aperture * sqrtf(r_rnd);
             float lensU = radius * cosf(theta);
             float lensV = radius * sinf(theta);
 
-            // Re-calculate Basis vectors (Or better: store them in struct)
-            float4 baseRight = f4(1.0f, 0.0f, 0.0f);
-            float4 baseUp    = f4(0.0f, 1.0f, 0.0f);
-            
-            float4 camRight = rotateY(rotateX(baseRight, xRot), yRot);
-            float4 camUp    = rotateY(rotateX(baseUp, xRot), yRot);
-
-            lensOffset = (camRight * lensU) + (camUp * lensV);
+            // Use precomputed right/up vectors! 
+            lensOffset = (right * lensU) + (up * lensV);
         }
 
-        // 6. Final Ray Construction
-        // Ray starts at the perturbed lens position
+        // 4. Final Ray Construction
         r.origin = cameraOrigin + lensOffset;
-        
-        // Ray points from perturbed origin towards the fixed focal point
         r.direction = normalize(focalPoint - r.origin);
 
         return r;
     }
 
-    __host__ __device__ float4 getForwardVector() const
+    __host__ void preCompute()
     {
         float4 localForward = f4(0.0f, 0.0f, -1.0f, 0.0f);
 
         float4 worldForward = rotateX(localForward, xRot);
         worldForward = rotateY(worldForward, yRot);
+        worldForward = rotateZ(worldForward, zRot);
 
-        return normalize(worldForward);
+        forward = normalize(worldForward);
+
+        float4 localRight = f4(1.0f, 0.0f, 0.0f, 0.0f);
+        right = normalize(rotateZ(rotateY(rotateX(localRight, xRot), yRot), zRot));
+
+        float4 localUp = f4(0.0f, 1.0f, 0.0f, 0.0f);
+        up = normalize(rotateZ(rotateY(rotateX(localUp, xRot), yRot), zRot));
+        
     }
-    
+
+    __host__ __device__ float4 getForwardVector() const
+    {
+        return forward;
+    }
+
+    __host__ __device__ float4 getRightVector() const
+    {
+        return right;
+    }
+
+    __host__ __device__ float4 getUpVector() const
+    {
+        return up;
+    }
+
+    // dark magic
+    __device__ bool worldToRaster(const float4& pointWorld, float2& pixelPos)
+    {
+        float4 dir = pointWorld - cameraOrigin;
+
+        float4 fwd = getForwardVector();
+        float4 right = getRightVector();
+        float4 up = getUpVector();
+
+        float distZ = dot(dir, fwd);
+
+        if (distZ <= 0.001f) return false; 
+
+        float distX = dot(dir, right);
+        float distY = dot(dir, up);
+
+        float slopeX = distX / distZ;
+        float slopeY = distY / distZ;
+        
+        float aspect = (float)w / (float)h;
+
+        float ndcX = slopeX / (aspect * fovScale);
+        float ndcY = slopeY / fovScale;
+
+        if (ndcX < -1.0f || ndcX > 1.0f || ndcY < -1.0f || ndcY > 1.0f) {
+            return false;
+        }
+        
+        pixelPos.x = (ndcX + 1.0f) * 0.5f * (float)w;
+        pixelPos.y = (ndcY + 1.0f) * 0.5f * (float)h;
+
+        return true;
+    }
 };
 
-struct PathVertex {
-    int materialID;
-    float4 pt;
-    float4 n;
-    float4 wo;
-    float4 wi;
-    float4 beta; 
-    float pdfFwd;        
-    float pdfRev;        
-    bool isDelta;
-    bool isLight;
-    int lightInd;
+__device__ __forceinline__ void drawLine(float4* overlay, Camera camera, float4 p1, float4 p2, float4 color)
+{
+    float nearClip = 0.002f; 
+    float4 camPos = camera.cameraOrigin;
+    float4 camFwd = camera.forward;
+
+    float d1 = dot(p1 - camPos, camFwd) - nearClip;
+    float d2 = dot(p2 - camPos, camFwd) - nearClip;
+
+    if (d1 < 0.0f && d2 < 0.0f) return;
+
+    if (d1 < 0.0f) {
+        float t = d1 / (d1 - d2);
+        p1 = p1 + (p2 - p1) * t;
+    } 
+    else if (d2 < 0.0f) {
+        float t = d2 / (d2 - d1);
+        p2 = p2 + (p1 - p2) * t;
+    }
+
+    float2 pxf1, pxf2;
+
+    if (!camera.worldToRaster(p1, pxf1) || !camera.worldToRaster(p2, pxf2))
+        return;
+    
+    int x0 = (int)pxf1.x;
+    int y0 = (int)pxf1.y;
+
+    int x1 = (int)pxf2.x;
+    int y1 = (int)pxf2.y;
+
+    int dx = abs(x1 - x0);
+    int dy = -abs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1;
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy; 
+
+    while (true) {
+        if (x0 >= 0 && x0 < camera.w && y0 >= 0 && y0 < camera.h) {
+            int pixelIndex = y0 * camera.w + x0;
+            
+            atomicExch(&overlay[pixelIndex].x, color.x);
+            atomicExch(&overlay[pixelIndex].y, color.y);
+            atomicExch(&overlay[pixelIndex].z, color.z);
+        }
+
+        if (x0 == x1 && y0 == y1) break;
+
+        int e2 = 2 * err;
+        if (e2 >= dy) { 
+            err += dy; 
+            x0 += sx; 
+        }
+        if (e2 <= dx) { 
+            err += dx; 
+            y0 += sy; 
+        }
+    }
+}
+
+struct PathVertices {
+    // material ID at this vertex
+    int* materialID;
+    
+    // location of this vertex
+    float4* pt;
+
+    // normal at this vertex
+    float4* n;
+
+    // direction from this vertex to the previous
+    float4* wo;
+
+    // uv coordinates of this vertex
+    float2* uv;
+
+    //float4* wi; storing is not neccesary
+
+    // throughput
+    float4* beta;
+
+    // pdf of going from previous vertex to this in area measure
+    float* pdfFwd;
+    
+    // pdf of going from current vertex to previous vertex in area measure
+    //float* pdfRev;
+    
+    // accumulated weight up this this vertex
+    float* misWeight; 
+    
+    bool* isDelta;
+    //bool*isLight;
+    int* lightInd;
+    bool* backface;
 };
+
+
+inline __device__ __forceinline__ int pathBufferIdx(int w, int h, int x, int y, int depth)
+{
+    //return (y * w + x) * maxDepth + depth;
+    return (depth * w * h) + y * w + x;
+}
+
+// rasterizes a path defined by the pathvertices. Used for debugging and visualization
+__device__ __forceinline__ void drawPath(float4* overlay, PathVertices* path, Camera camera, int x, int y, int w, 
+    int depth, int maxDepth, float4 color)
+{
+    for (int i = 0; i < depth - 1; i++)
+    {
+        //float ratio = (float)(i+1) / float(depth); 
+        int pathIDX1 = pathBufferIdx(w, x, y, i, maxDepth);
+        int pathIDX2 = pathBufferIdx(w, x, y, i+1, maxDepth);
+        drawLine(overlay, camera, path->pt[pathIDX1], path->pt[pathIDX2], color);
+    }
+}
+
+static __device__ __forceinline__ void debugPrintPath(
+    int w, int h, int x, int y, int maxDepth,
+    const PathVertices& PV)
+{
+    //const int pixelIndex = y * w + x;
+
+    // Print header first
+    printf("=== PATH DUMP pixel (%d, %d) Length: %d ===\n", x, y, maxDepth);
+
+    // Print each depth entry with its own single printf
+    // (but each line is atomic so it will not mix)
+    for (int depth = 0; depth < maxDepth; depth++)
+    {
+        int idx = pathBufferIdx(w, h, x, y, depth);
+
+        printf(
+            "Depth %d\n"
+            "  materialID: %d\n"
+            "  pt:   (%.3f, %.3f, %.3f)\n"
+            "  n:    (%.3f, %.3f, %.3f)\n"
+            "  wo:   (%.3f, %.3f, %.3f)\n"
+            "  uv:   (%.3f, %.3f)\n"
+            "  beta: (%.3f, %.3f, %.3f)\n"
+            "  pdfFwd: %.6f\n"
+            "  misWeight: %.6f\n"
+            "  isDelta: %d\n"
+            "  lightInd: %d\n"
+            "  backface: %d\n\n",
+
+            depth,
+            PV.materialID[idx],
+            PV.pt[idx].x, PV.pt[idx].y, PV.pt[idx].z,
+            PV.n[idx].x, PV.n[idx].y, PV.n[idx].z,
+            PV.wo[idx].x, PV.wo[idx].y, PV.wo[idx].z,
+            PV.uv[idx].x, PV.uv[idx].y,
+            PV.beta[idx].x, PV.beta[idx].y, PV.beta[idx].z,
+            PV.pdfFwd[idx],
+            PV.misWeight[idx],
+            PV.isDelta[idx],
+            PV.lightInd[idx],
+            PV.backface[idx]
+        );
+    }
+}
+
 
 struct Intersection
 {
@@ -338,7 +533,7 @@ struct Intersection
 
     float2 uv;
     //Ray ray;
-    Triangle tri;
+    //Triangle tri;
     int triIDX;
     int materialID;
     bool valid;
@@ -346,7 +541,7 @@ struct Intersection
 
     float dist;
 
-    __device__ Intersection() {valid = false;};
+    __device__ Intersection() {valid = false; uv = f2(-1.0f);};
 };
 
 enum IntegratorChoice {
@@ -392,6 +587,8 @@ struct Material
     bool isSpecular;
     bool boundary; // for mediums tack calculations
 
+    bool thinWalled;
+
     float4 absorption;
 
     int priority; // dielectric priority, for nested dielectrics/medium stack
@@ -410,6 +607,8 @@ struct Material
         m.roughness = 1.0f;
         m.boundary = false;
         m.absorption = f4();
+        m.thinWalled = false;
+        m.isSpecular = false;
         return m;
     }
 
@@ -425,6 +624,9 @@ struct Material
         m.roughness = 1.0f;
         m.boundary = false;
         m.absorption = f4();
+        m.thinWalled = false;
+
+        m.isSpecular = false;
         return m;
     }
 
@@ -440,6 +642,9 @@ struct Material
         m.metallic = 1.0f;
         m.boundary = false;
         m.absorption = f4();
+        m.thinWalled = false;
+
+        m.isSpecular = false;
         return m;
     }
 
@@ -456,6 +661,7 @@ struct Material
         m.boundary = true;
 
         m.absorption = k;
+        m.thinWalled = false;
         return m;
     }
 
@@ -469,6 +675,7 @@ struct Material
         m.roughness = roughness;
         m.albedo = f4(1.0f);
 
+        m.thinWalled = false;
         return m;
     }
 
@@ -490,7 +697,9 @@ struct Material
         m.width = w;
         m.height = h;
 
- 
+        m.thinWalled = true;
+
+        m.isSpecular = false;
 
         return m;
     }
@@ -516,6 +725,10 @@ struct Material
         m.tstartInd = tsInd;
         m.twidth = tw;
         m.theight = th;
+
+        m.thinWalled = true;
+
+        m.isSpecular = false;
 
         return m;
     }

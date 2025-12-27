@@ -14,6 +14,8 @@ public:
     void setColor(int x, int y, float4 c);
     float4 getColor(int x, int y);
     void saveImageBMP(std::string fileName);
+    void saveImageCSV();
+    void saveImageCSV_MONO(int choice);
     
 
     int toIndex(int x, int y);

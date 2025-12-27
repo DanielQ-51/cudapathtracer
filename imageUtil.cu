@@ -13,6 +13,7 @@ Uses a 1d vector of pixels instead of 2d for minor optimization.
 #include <fstream>
 #include <algorithm>
 #include <iostream>
+#include <iomanip>
 
 #pragma pack(push, 1)
 struct BMPFileHeader {
@@ -73,32 +74,67 @@ void Image::saveImageBMP(std::string fileName) {
     out.write((char*)&fileHeader, sizeof(fileHeader));
     out.write((char*)&infoHeader, sizeof(infoHeader));
 
+
     int rowSize = (3 * width + 3) & (~3); // each row padded to multiple of 4 bytes
-    //int diff = width - rowSize;
 
     float4 c;
     std::vector<unsigned char> row(rowSize);
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
             c = getColor(x, y);
-            //c /= std::max(c[2], std::max(c[0], c[1]));
-
-            //std::cout << c.b << " " << c.g << " " << c.r << std::endl; c[2]/max(c[2].x(),c[2].y(),c[2].z())
 
             row[x*3 + 0] = static_cast<unsigned char>(clamp(c.z, 0.0f, 1.0f) * 255.0f + 0.5f);
             row[x*3 + 1] = static_cast<unsigned char>(clamp(c.y, 0.0f, 1.0f) * 255.0f + 0.5f);
             row[x*3 + 2] = static_cast<unsigned char>(clamp(c.x, 0.0f, 1.0f) * 255.0f + 0.5f);
 
-            //std::cout << static_cast<unsigned char>(c.b * 255.0f + 0.5f) << " " << static_cast<unsigned char>(c.g * 255.0f + 0.5f) << " " << static_cast<unsigned char>(c.r * 255.0f + 0.5f) << std::endl;
         }
 
-        //for (int i = 0; i < diff*3; i++) {
-        //    row[width*3 + i] = 0;
-        //}
         out.write(reinterpret_cast<char*>(row.data()), rowSize);
     }
 
     out.close();
+}
+
+void Image::saveImageCSV() 
+{
+    std::ofstream csvOut("renderCSV.csv");
+    csvOut << std::scientific << std::setprecision(3);
+
+    float4 c;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            c = getColor(x, y);
+
+            csvOut << "\"(" << c.x << ", " << c.y << ", " << c.z << ")\"";
+
+            if (x < width - 1) {
+                csvOut << ",";
+            }
+        }
+        csvOut << "\n";
+    }
+    csvOut.close();
+}
+
+void Image::saveImageCSV_MONO(int choice) 
+{
+    std::ofstream csvOut("renderCSV.csv");
+    csvOut << std::scientific << std::setprecision(3);
+
+    float4 c;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            c = getColor(x, y);
+
+            csvOut << getFloat4Component(c, choice);
+
+            if (x < width - 1) {
+                csvOut << ",";
+            }
+        }
+        csvOut << "\n";
+    }
+    csvOut.close();
 }
 
 Image loadBMPToImage(const std::string &filename) {

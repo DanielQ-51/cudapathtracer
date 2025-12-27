@@ -7,8 +7,18 @@
 #include <curand_kernel.h>
 using namespace std;
 
-__device__ __constant__ float EPSILON = 0.000001f;
+__device__ __constant__ float EPSILON = 0.00001f;
+__device__ __constant__ float RAY_EPSILON = 0.0001f;
 __device__ __constant__ float PI = 3.141592f;
+__device__ __constant__ float SKY_RADIUS = 100.0f;
+__device__ __constant__ float MAX_FIREFLY_LUM = 20.0f;
+
+__device__ __constant__ bool BDPT_LIGHTTRACE = true;
+__device__ __constant__ bool BDPT_NEE = false;
+__device__ __constant__ bool BDPT_NAIVE = false;
+__device__ __constant__ bool BDPT_CONNECTION = false;
+
+__device__ __constant__ bool BDPT_DRAWPATH = false;
 
 inline __host__ __device__ __forceinline__ float4 f4(float x, float y, float z, float w = 0.0f) {
     return make_float4(x, y, z, w);
@@ -18,9 +28,7 @@ inline __host__ __device__ __forceinline__ float4 f4() {return make_float4(0,0,0
 
 inline __host__ __device__ __forceinline__ float4 f4(float a) {return make_float4(a,a,a,0);}
 
-inline __host__ __device__ __forceinline__ float2 f2(float x, float y) {
-    return make_float2(x, y);
-}
+inline __host__ __device__ __forceinline__ float2 f2(float x, float y) {return make_float2(x, y);}
 
 inline __host__ __device__ __forceinline__ float2 f2() {return make_float2(0,0);}
 
@@ -250,4 +258,9 @@ __device__ __forceinline__ float4 sampleSphere(curandState& localState, float R)
     float y = r * sinf(phi);
 
     return f4(R * x, R * y, R * z);
+}
+
+__device__ inline float luminance(float4 c)
+{
+    return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
 }

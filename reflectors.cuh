@@ -19,6 +19,8 @@ __device__ void cosine_pdf(const float4& wo_local, float& pdf)
 __device__ void cosine_sample_f(curandState& localState, const float4& baseColor, float4& wo, float4& f_val, float& pdf)
 {
     float u1 = curand_uniform(&localState);
+
+    u1 = fminf(u1, 1.0f-EPSILON);
     float u2 = curand_uniform(&localState); 
 
     float r = sqrt(u1);
@@ -232,7 +234,7 @@ __device__ void smooth_dielectric_sample_f(curandState& localState,
             return;
         }
         // BSDF term
-        f_val = f4((1.0f - F) * eta * eta / cosThetaO);
+        f_val = f4((1.0f - F) * eta * eta / fabsf(cosThetaO));
         pdf = 1.0f - F;
     }
     
@@ -285,7 +287,7 @@ __device__ void dumb_smooth_dielectric_sample_f(curandState& localState,
     {
         wo = f4(-wi.x, -wi.y, wi.z);
         float cosThetaO = wo.z;
-        f_val = f4(1.0f / fabsf(cosThetaO));
+        f_val = f4(1.0f / cosThetaO);
         pdf = 1.0f;
         return;
     }
@@ -296,7 +298,7 @@ __device__ void dumb_smooth_dielectric_sample_f(curandState& localState,
         wo = f4(-wi.x, -wi.y, wi.z);
         float cosThetaO = wo.z;
         pdf = F;
-        f_val = f4(F / fabsf(cosThetaO));
+        f_val = f4(F / cosThetaO);
     } 
     else {
         float eta = etaI / etaT;
@@ -308,6 +310,7 @@ __device__ void dumb_smooth_dielectric_sample_f(curandState& localState,
         );
 
         float cosThetaO = wo.z;
+
         // BSDF term
         f_val = f4((1.0f - F) * eta * eta / fabsf(cosThetaO));
         pdf = 1.0f - F;
@@ -490,7 +493,7 @@ __device__ void leaf_sample_f(curandState& localState, const float4& wi, float i
 
 // For dielectrics, when this function is called, we know whether or not it refracts, and that etaI and etaT are in fact correct
 // wi passed in is facing the surface, so we flip it normally. The shading uses wi as pointing away
-__device__ void f_eval(curandState& localState, const Material* materials, int materialID, float4* textures,
+__device__ void f_eval(const Material* materials, int materialID, float4* textures,
     const float4& wi, const float4& wo, float etaI, float etaT, float4& f_val, const float2 uv)
 {
     const Material& mat = materials[materialID];
@@ -552,8 +555,8 @@ __device__ void sample_f_eval(curandState& localState, const Material* materials
     }
     else if (mat.type == MAT_SMOOTHDIELECTRIC)
     {
-        //dumb_smooth_dielectric_sample_f(localState, -wi, mat.ior, backface , wo, f_val, pdf);
-        smooth_dielectric_sample_f(localState, -wi, etaI, etaT, wo, f_val, pdf);
+        dumb_smooth_dielectric_sample_f(localState, -wi, mat.ior, backface, wo, f_val, pdf);
+        //smooth_dielectric_sample_f(localState, -wi, etaI, etaT, wo, f_val, pdf);
     }
     else if (mat.type == MAT_LEAF)
     {

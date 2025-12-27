@@ -10,6 +10,7 @@
 #include <vector>
 #include <chrono>
 #include <set>
+#include <iomanip>  
 
 using namespace std;
 
@@ -32,7 +33,7 @@ void computeInfoForBVH(Vertices& vertices, vector<Triangle>& mesh, vector<float4
             fminf(fminf(a.x, b.x), c.x),
             fminf(fminf(a.y, b.y), c.y),
             fminf(fminf(a.z, b.z), c.z)
-        );
+        ) - f4(0.000001f);
         AABBmins.push_back(minPos);
 
         // Compute AABB max
@@ -40,7 +41,7 @@ void computeInfoForBVH(Vertices& vertices, vector<Triangle>& mesh, vector<float4
             fmaxf(fmaxf(a.x, b.x), c.x),
             fmaxf(fmaxf(a.y, b.y), c.y),
             fmaxf(fmaxf(a.z, b.z), c.z)
-        );
+        ) + f4(0.000001f);
         AABBmaxes.push_back(maxPos);
     }
 }
@@ -233,33 +234,64 @@ int buildBVH(vector<BVHnode>& nodes, vector<int>& indices, vector<float4>& centr
 
 int main ()
 {
+    auto now = std::chrono::system_clock::now();
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+
+    std::cout << "Current time: " 
+              << std::put_time(std::localtime(&t), "%Y-%m-%d %H:%M:%S")
+              << "\n\n";
+
     auto start = std::chrono::high_resolution_clock::now();
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     // Render Settings
     //---------------------------------------------------------------------------------------------------------------------------------------------------
 
-    int integratorChoice = UNIDIRECTIONAL;
+    int integratorChoice = BIDIRECTIONAL;
 
-    int w = 3840;
-    int h = 2160;
+    int w = 1000;
+    int h = 1000;
     //int w = 1920;
     //int h = 1080;
 
-    int sampleCount = 100;
-    int maxDepth = 8;
+    int sampleCount = 5000;
+    int maxDepth = 15;
+
+    int eyePathDepth = 20;
+    int lightPathDepth = 12;
     
     int maxLeafSize = 2; // max leaf size for the BVH
 
-    Camera camera = Camera::NotPinhole(f4(-0.5f, -0.55f, 2.4f), w, h, 15.0f, 25.0f, 0.0f, 36.9f, 0.015f, 2.15f);
+    //Camera camera = Camera::NotPinhole(f4(-0.5f, -0.55f, 2.4f), w, h, 15.0f, 25.0f, 0.0f, 36.9f, 0.015f, 2.15f);
+    //Camera camera = Camera::NotPinhole(f4(0.0f, 0.0f, 1.0f), w, h, 0.0f, 0.0f, 0.0f, 45.0f, 0.015f, 2.15f);
+    Camera camera = Camera::Pinhole(f4(0.0f,0.0f, 1.0f), w, h, 0.0f, 0.0f, 0.0f, 60.0f);
+    //Camera camera = Camera::Pinhole(f4(-0.1f,0.6f, 1.0f), w, h, -15.0f, 0.0f, 0.0f, 37.0f);
+    //Camera camera = Camera::Pinhole(f4(-1.1f,-0.6f, -0.452f), w, h, 14.0f, -60.0f, 0.0f, 70.0f);
 
     Image image = Image(w, h);
 
-    cout << "Rendering at " << w << " by " << h << " pixels, with " << 
-        sampleCount << " samples per pixel, and a maximum leaf size of " <<
-        maxLeafSize << endl << endl;
+    if (integratorChoice == UNIDIRECTIONAL)
+    {
+        cout << "Rendering at " << w << " by " << h << " pixels, with " << 
+            sampleCount << " samples per pixel, and a maximum leaf size of " <<
+            maxLeafSize << " primitives, with a max depth of " << 
+            maxDepth << "." << endl << endl;
+    }
+    else if (integratorChoice == BIDIRECTIONAL)
+    {
+        cout << "Rendering at " << w << " by " << h << " pixels, with " << 
+            sampleCount << " samples per pixel, and a maximum leaf size of " <<
+            maxLeafSize << " primitives, with a max eye depth of " << 
+            eyePathDepth << ", and a max light depth of " << 
+            lightPathDepth << "." << endl << endl;
+    }
 
     float4* out_colors;
     cudaMalloc(&out_colors, w * h * sizeof(float4));
+    cudaMemset(out_colors, 0, w * h * sizeof(float4));
+
+    float4* out_overlay;
+    cudaMalloc(&out_overlay, w * h * sizeof(float4));
+    cudaMemset(out_overlay, 0, w * h * sizeof(float4));
 
     Vertices vertices;
     vector<float4> points;
@@ -291,7 +323,6 @@ int main ()
     images.push_back(loadBMPToImage("textures/enkiduchibitexture.bmp"));
     images.push_back(loadBMPToImage("textures/leaftex2.bmp"));
     images.push_back(loadBMPToImage("textures/leafautumn.bmp"));
-    images.push_back(loadBMPToImage("textures/leaftransmission.bmp"));
 
     for (Image i : images)
     {
@@ -318,6 +349,7 @@ int main ()
     Material lambert2Textured = Material::DiffuseTextured(startIndices[1], widths[1], heights[1]);
 
     Material lambertBlue = Material::Diffuse(f4(0.4f,0.4f,0.8f));
+    Material lambertGrey = Material::Diffuse(f4(0.8f,0.8f,0.8f));
     Material lambertWhite = Material::Diffuse(f4(0.9f,0.9f,0.9f));
     Material lambertGreen = Material::Diffuse(f4(0.2f,0.6f,0.6f));
     Material lambertRed = Material::Diffuse(f4(0.99f,0.01f,0.01f));
@@ -337,6 +369,7 @@ int main ()
     float ior = 1.5f;
 
     Material glass = Material::SmoothDielectric(ior, f4(0.0f), 1);
+    Material diamond = Material::SmoothDielectric(2.42, f4(0.0f), 1);
 
     Material water = Material::SmoothDielectric(1.333f, f4(), 2);
     Material tea = Material::SmoothDielectric(1.333f, 2.5f * f4(0.180f, 1.5f, 2.996f), 2);
@@ -370,6 +403,8 @@ int main ()
     mats.push_back(leafStem); // index 14
     mats.push_back(sky); // index 15
     mats.push_back(leafAutumn); // index 16
+    mats.push_back(lambertGrey); // index 17
+    mats.push_back(diamond); // index 18
     //mats.push_back(green); // index 16
 
     Material* mats_d;
@@ -382,18 +417,24 @@ int main ()
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     
     
-    //readObjSimple("scenedata/smallbox.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 11);
+    readObjSimple("scenedata/smallbox.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 17);
+    //readObjSimple("scenedata/box2.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 17);
+    //readObjSimple("scenedata/box2.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 17);
+    //readObjSimple("scenedata/ballwithholes.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 2);
+    //readObjSimple("scenedata/notbox21.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(5.0f), 2);
     //cout << "scene data read. There are " << mesh.size() << " Triangles." << endl;
-    //readObjSimple("scenedata/leftwall.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.4f,0.4f,0.8f), f4(), 1);
-    //readObjSimple("scenedata/rightwall.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.8f,0.2f,0.2f), f4(), 3);
+    readObjSimple("scenedata/leftwall.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.4f,0.4f,0.8f), f4(), 1);
+    readObjSimple("scenedata/rightwall.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.8f,0.2f,0.2f), f4(), 3);
     //readObjSimple("scenedata/rightwall.obj", points, normals, colors, mesh, lightsvec, f4(0.2f,0.6f,0.6f), f4(), 2);
     //readObjSimple("scenedata/leftball.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 4);
     //readObjSimple("scenedata/cup3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 12);
     //readObjSimple("scenedata/leaves3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 13);
     //readObjSimple("scenedata/leafstem.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 14);
     //readObjSimple("scenedata/Cup.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
-    //readObjSimple("scenedata/water.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 10);
-    //readObjSimple("scenedata/icecubes.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 9);
+    //readObjSimple("scenedata/waterway3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
+    //readObjSimple("scenedata/cup.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
+    //readObjSimple("scenedata/overlappingboxes.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 2);
+    //readObjSimple("scenedata/mikushiny.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 18);
     //readObjSimple("scenedata/spoon.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 7);
     //readObjSimple("scenedata/swordbetter.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.1f,0.1f), f4(), 3);//5.0f*f4(3.0f,1.0f,1.0f)
     //readObjSimple("scenedata/character.obj", vertices, mesh, lightsvec, 1.0f*f4(0.9f,0.9f,0.9f), f4(), 1);
@@ -402,19 +443,23 @@ int main ()
     //readObjSimple("scenedata/leftlight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 20.0f*f4(10.0f,1.0f,1.0f), 2);
     //readObjSimple("scenedata/rightlight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 20.0f*f4(3.0f,3.0f,10.0f), 2);
     //readObjSimple("scenedata/reallysmalllight.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 30.0f*f4(7.0f,7.0f,3.0f), 1);
-    //readObjSimple("scenedata/lightforward.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.5f*f4(7.0f,7.0f,7.0f), 2);
+    //readObjSimple("scenedata/lightforward.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 1.5f*f4(7.0f,7.0f,7.0f), 2);
+    //readObjSimple("scenedata/.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 190.0f*f4(12.0f,12.0f,10.0f), 2);
+    readObjSimple("scenedata/smallwaterlight3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 80.0f*f4(7.0f,7.0f,7.0f), 2);
+    //readObjSimple("scenedata/biglight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.9f*f4(7.0f,7.0f,7.0f), 2);
+    //readObjSimple("scenedata/verybiglight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.1f*f4(7.0f,7.0f,7.0f), 2);
     //readObjSimple("scenedata/leaflight2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 2.3f*f4(9.0f,9.0f,7.0f), 2);
     //readObjSimple("scenedata/lightbehindleaf.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 5.0f*f4(9.0f,9.0f,7.0f), 2);
     //readObjSimple("scenedata/backlight.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 1.5f*f4(6.0f,7.0f,7.0f), 2);
 
-    readObjSimple("scenedata/sun2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 350.0f*f4(15.0f,3.0f,2.0f), 2);
+    //readObjSimple("scenedata/sun2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 350.0f*f4(15.0f,3.0f,2.0f), 2);
     //readObjSimple("scenedata/sunback.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f*f4(9.0f,6.0f,2.0f), 2);
-    readObjSimple("scenedata/leavescomplex.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f*f4(9.0f,9.0f,7.0f), 13);
-    readObjSimple("scenedata/branches.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f*f4(9.0f,9.0f,7.0f), 14);
-    readObjSimple("scenedata/waterdrops.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f*f4(9.0f,9.0f,7.0f), 10);
+    //readObjSimple("scenedata/leavescomplex.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f*f4(9.0f,9.0f,7.0f), 13);
+    //readObjSimple("scenedata/branches.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f*f4(9.0f,9.0f,7.0f), 14);
+    //readObjSimple("scenedata/waterdrops.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f*f4(9.0f,9.0f,7.0f), 10);
     //readObjSimple("scenedata/wallkinda.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f*f4(9.0f,9.0f,7.0f), 6);
     //readObjSimple("scenedata/canopy.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.0f * f4(0.4f, 0.4f, 1.00f), 16);
-        
+    
     Vertices* verts;
     Triangle* scene;
     Triangle* lights;
@@ -440,7 +485,7 @@ int main ()
         cout << "Error: No triangles loaded." << endl;
         return 1;
     }
-    cout << "scene data read. There are " << mesh.size() << " Triangles." << endl;
+    cout << "scene data read. There are " << mesh.size() << " Triangles and " << lightsvec.size() << " +1 lights" << endl;
 
     auto afterRead = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed_seconds_afterRead = afterRead - start;
@@ -465,9 +510,10 @@ int main ()
 
     BVHnode root = bvhvec[0];
     float4 sceneCenter = (root.aabbMAX + root.aabbMIN) * 0.5f;
-    float sceneRadius = length(root.aabbMAX - sceneCenter) + EPSILON;
+    float sceneRadius = length(root.aabbMAX - sceneCenter) + 0.01f;
 
-    cout << "BVH built. Largest leaf is size: " << failcount << "." << " Backup was called "<< backupCt << " times." << endl;
+    cout << "BVH built. Scene radius is " << sceneRadius << "." << endl;
+    cout << "Largest leaf is size: " << failcount << "." << " Backup was called "<< backupCt << " times." << endl;
     //printBVH(bvhvec, indvec);
     printBVHSummary(bvhvec);
 
@@ -492,29 +538,129 @@ int main ()
     // Additional setup according to which integrator is used
     //---------------------------------------------------------------------------------------------------------------------------------------------------
 
-    PathVertex* eyePath_d;
-    PathVertex* lightPath_d;
-
-    if (integratorChoice == BIDIRECTIONAL)
+    
+    if (integratorChoice == UNIDIRECTIONAL)
+        launch_unidirectional(maxDepth, camera, mats_d, textures_d, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, true, w, h, out_colors);
+    else if (integratorChoice == BIDIRECTIONAL)
     {
-        int pathBufferSize = w * h * maxDepth;
+        int totalEyePathVertices = w * h * eyePathDepth;
+        int totalLightPathVertices = w * h * lightPathDepth;
 
-        cudaMalloc(&eyePath_d, pathBufferSize * sizeof(PathVertex));
-        cudaMalloc(&lightPath_d, pathBufferSize * sizeof(PathVertex));
+        PathVertices* eyePath_d;
+        cudaMalloc(&eyePath_d, sizeof(PathVertices));
+
+        PathVertices tempPaths;
+
+        cudaMalloc(&tempPaths.materialID, sizeof(int) * totalEyePathVertices);
+        cudaMalloc(&tempPaths.pt,         sizeof(float4) * totalEyePathVertices);
+        cudaMalloc(&tempPaths.n,          sizeof(float4) * totalEyePathVertices);
+        cudaMalloc(&tempPaths.wo,         sizeof(float4) * totalEyePathVertices);
+        cudaMalloc(&tempPaths.beta,       sizeof(float4) * totalEyePathVertices);
+        cudaMalloc(&tempPaths.pdfFwd,     sizeof(float) * totalEyePathVertices);
+        cudaMalloc(&tempPaths.misWeight,  sizeof(float) * totalEyePathVertices);
+        cudaMalloc(&tempPaths.isDelta,    sizeof(bool) * totalEyePathVertices);
+        cudaMalloc(&tempPaths.lightInd,   sizeof(int) * totalEyePathVertices);
+        cudaMalloc(&tempPaths.uv,   sizeof(float2) * totalEyePathVertices);
+        cudaMalloc(&tempPaths.backface,   sizeof(bool) * totalEyePathVertices);
+
+        cudaMemset(tempPaths.materialID, 0, sizeof(int) * totalEyePathVertices);
+        cudaMemset(tempPaths.pt,         0, sizeof(float4) * totalEyePathVertices);
+        cudaMemset(tempPaths.n,          0, sizeof(float4) * totalEyePathVertices);
+        cudaMemset(tempPaths.wo,         0, sizeof(float4) * totalEyePathVertices);
+        cudaMemset(tempPaths.beta,       0, sizeof(float4) * totalEyePathVertices);
+        cudaMemset(tempPaths.pdfFwd,     0, sizeof(float) * totalEyePathVertices);
+        cudaMemset(tempPaths.misWeight,  0, sizeof(float) * totalEyePathVertices);
+        cudaMemset(tempPaths.isDelta,    0, sizeof(bool) * totalEyePathVertices);
+        cudaMemset(tempPaths.lightInd,   0, sizeof(int) * totalEyePathVertices);
+        cudaMemset(tempPaths.uv,   0, sizeof(float2) * totalEyePathVertices);
+        cudaMemset(tempPaths.backface,   0, sizeof(bool) * totalEyePathVertices);
+
+        cudaMemcpy(eyePath_d, &tempPaths, sizeof(PathVertices), cudaMemcpyHostToDevice);
+
+        PathVertices* lightPath_d;
+        cudaMalloc(&lightPath_d, sizeof(PathVertices));
+
+        PathVertices tempPaths1;
+
+        cudaMalloc(&tempPaths1.materialID, sizeof(int) * totalLightPathVertices);
+        cudaMalloc(&tempPaths1.pt,         sizeof(float4) * totalLightPathVertices);
+        cudaMalloc(&tempPaths1.n,          sizeof(float4) * totalLightPathVertices);
+        cudaMalloc(&tempPaths1.wo,         sizeof(float4) * totalLightPathVertices);
+        cudaMalloc(&tempPaths1.beta,       sizeof(float4) * totalLightPathVertices);
+        cudaMalloc(&tempPaths1.pdfFwd,     sizeof(float) * totalLightPathVertices);
+        cudaMalloc(&tempPaths1.misWeight,  sizeof(float) * totalLightPathVertices);
+        cudaMalloc(&tempPaths1.isDelta,    sizeof(bool) * totalLightPathVertices);
+        cudaMalloc(&tempPaths1.lightInd,   sizeof(int) * totalLightPathVertices);
+        cudaMalloc(&tempPaths1.uv,   sizeof(float2) * totalLightPathVertices);
+        cudaMalloc(&tempPaths1.backface,   sizeof(bool) * totalLightPathVertices);
+
+        cudaMemset(tempPaths1.materialID, 0, sizeof(int) * totalLightPathVertices);
+        cudaMemset(tempPaths1.pt,         0, sizeof(float4) * totalLightPathVertices);
+        cudaMemset(tempPaths1.n,          0, sizeof(float4) * totalLightPathVertices);
+        cudaMemset(tempPaths1.wo,         0, sizeof(float4) * totalLightPathVertices);
+        cudaMemset(tempPaths1.beta,       0, sizeof(float4) * totalLightPathVertices);
+        cudaMemset(tempPaths1.pdfFwd,     0, sizeof(float) * totalLightPathVertices);
+        cudaMemset(tempPaths1.misWeight,  0, sizeof(float) * totalLightPathVertices);
+        cudaMemset(tempPaths1.isDelta,    0, sizeof(bool) * totalLightPathVertices);
+        cudaMemset(tempPaths1.lightInd,   0, sizeof(int) * totalLightPathVertices);
+        cudaMemset(tempPaths1.uv,   0, sizeof(float2) * totalLightPathVertices);
+        cudaMemset(tempPaths1.backface,   0, sizeof(bool) * totalLightPathVertices);
+
+        cudaMemcpy(lightPath_d, &tempPaths1, sizeof(PathVertices), cudaMemcpyHostToDevice);
+
+        launch_bidirectional(eyePathDepth, lightPathDepth, camera, eyePath_d, lightPath_d, mats_d, textures_d, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, w, h, sceneCenter, sceneRadius, out_colors, out_overlay);
+        cudaFree(eyePath_d);
+        cudaFree(lightPath_d);
+
+        cudaFree(tempPaths.materialID);
+        cudaFree(tempPaths.pt);
+        cudaFree(tempPaths.n);
+        cudaFree(tempPaths.wo);
+        cudaFree(tempPaths.beta);
+        cudaFree(tempPaths.misWeight);
+        cudaFree(tempPaths.isDelta);
+        cudaFree(tempPaths.lightInd);
+        cudaFree(tempPaths.uv);
+        cudaFree(tempPaths.pdfFwd);
+        cudaFree(tempPaths.backface);
+
+        cudaFree(tempPaths1.materialID);
+        cudaFree(tempPaths1.pt);
+        cudaFree(tempPaths1.n);
+        cudaFree(tempPaths1.wo);
+        cudaFree(tempPaths1.beta);
+        cudaFree(tempPaths1.misWeight);
+        cudaFree(tempPaths1.isDelta);
+        cudaFree(tempPaths1.lightInd);
+        cudaFree(tempPaths1.uv);
+        cudaFree(tempPaths1.pdfFwd);
+        cudaFree(tempPaths1.backface);
+
+
     }
     
 
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     // Launch GPU Code - goes to functions in deviceCode.cu
     //---------------------------------------------------------------------------------------------------------------------------------------------------
-    
-    if (integratorChoice == UNIDIRECTIONAL)
-        launch_unidirectional(maxDepth, camera, mats_d, textures_d, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, true, w, h, out_colors);
-    else if (integratorChoice == BIDIRECTIONAL)
-        launch_bidirectional(maxDepth, camera, eyePath_d, lightPath_d, mats_d, textures_d, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, w, h, sceneCenter, sceneRadius, out_colors);
 
     float4* host_colors = new float4[w * h];
     cudaMemcpy(host_colors, out_colors, w * h * sizeof(float4), cudaMemcpyDeviceToHost);
+
+    float4* host_overlay = new float4[w * h];
+    cudaMemcpy(host_overlay, out_overlay, w * h * sizeof(float4), cudaMemcpyDeviceToHost);
+
+    for (int i = 0; i < w * h; i++)
+    {
+        host_colors[i] /= (float)sampleCount;
+
+        if (isnan(host_colors[i].x) || isnan(host_colors[i].y) || isnan(host_colors[i].z)) {
+            host_colors[i] = f4(1.0f, 0.0f, 1.0f); // Bright Pink for NaN
+        }
+        if (isinf(host_colors[i].x) || isinf(host_colors[i].y) || isinf(host_colors[i].z)) {
+            host_colors[i] = f4(0.0f, 1.0f, 0.0f); // Bright Green for Inf
+        }
+    }
 
     for (int i = 0; i < w; i++)
     {
@@ -524,13 +670,17 @@ int main ()
             if (host_colors[image.toIndex(i, j)].x < 0 || host_colors[image.toIndex(i, j)].y < 0 || host_colors[image.toIndex(i, j)].z < 0)
                 cout << i << ", " << j << " Negative color written: <" << host_colors[image.toIndex(i, j)].x << ", " << host_colors[image.toIndex(i, j)].y << ", " 
                     << host_colors[image.toIndex(i, j)].z << ">"<< endl;
-            image.setColor(i, j, host_colors[image.toIndex(i, j)]);
+
+            if (host_overlay[image.toIndex(i, j)].x == 0 && host_overlay[image.toIndex(i, j)].y == 0 && host_overlay[image.toIndex(i, j)].z == 0)
+                image.setColor(i, j, host_colors[image.toIndex(i, j)]);
+            else
+                image.setColor(i, j, host_overlay[image.toIndex(i, j)]);
         }
-        
     }
     
     // memory freeing
     cudaFree(out_colors);
+    cudaFree(out_overlay);
     cudaFree(verts);
     cudaFree(scene);
     cudaFree(lights);
@@ -538,13 +688,16 @@ int main ()
     cudaFree(BVHindices);
     cudaFree(mats_d);
     cudaFree(textures_d);
-    cudaFree(eyePath_d);
-    cudaFree(lightPath_d);
+
+    cudaFree(temp.positions);
+    cudaFree(temp.normals);
+    cudaFree(temp.colors);
+    cudaFree(temp.uvs);
     delete[] host_colors;
 
     std::string filename = "render.bmp";
     image.saveImageBMP(filename);
-
+    image.saveImageCSV_MONO(0);
 
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -559,7 +712,7 @@ int main ()
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     std::cout << "Total Elapsed time (ms): " << elapsed_ms.count() << " milliseconds" << std::endl;
 
-    
+    return 1;
 }
 
 
@@ -615,9 +768,6 @@ void readObjSimple(string filename, vector<float4>& points, vector<float4>& norm
             vector<int> vertexIndices;
             vector<int> normalIndices;
             vector<int> uvIndices;
-
-            bool hasUV = uvIndices.size() == vertexIndices.size();
-            bool hasN  = normalIndices.size() == vertexIndices.size();
             while (iss >> vertinfo) 
             {
                 istringstream vss(vertinfo);
@@ -639,6 +789,8 @@ void readObjSimple(string filename, vector<float4>& points, vector<float4>& norm
                         normalIndices.push_back(stoi(idx) - 1);
                 }
             }
+            bool hasUV = uvIndices.size() == vertexIndices.size();
+            bool hasN  = normalIndices.size() == vertexIndices.size();
             int n = vertexIndices.size();
             // Triangulate the polygon as a fan from the first vertex
             for (int i = 1; i < n - 1; ++i) {
@@ -658,12 +810,12 @@ void readObjSimple(string filename, vector<float4>& points, vector<float4>& norm
 
                 Triangle tri;
                 if (isLight)
-                    tri = Triangle(idx0, idx1, idx2, n_idx0, n_idx1, n_idx2, materialID, uv_idx0, uv_idx1, uv_idx2, e, nextLightIndex);
+                    tri = Triangle(idx0, idx1, idx2, n_idx0, n_idx1, n_idx2, materialID, uv_idx0, uv_idx1, uv_idx2, e, nextLightIndex, mesh.size());
                 else
-                    tri = Triangle(idx0, idx1, idx2, n_idx0, n_idx1, n_idx2, materialID, uv_idx0, uv_idx1, uv_idx2, e, -51);
+                    tri = Triangle(idx0, idx1, idx2, n_idx0, n_idx1, n_idx2, materialID, uv_idx0, uv_idx1, uv_idx2, e, -51, mesh.size());
                 mesh.push_back(tri);
 
-                if (lengthSquared(e) > 0) {
+                if (isLight) {
                     lights.push_back(tri);
                     nextLightIndex++;
                 }
