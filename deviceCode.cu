@@ -485,6 +485,7 @@ __device__ void removeMaterialFromStack(int* stack, int* stackTop, int materialI
 
 __device__ float4 sampleSky(float4 direction)
 {
+    return f4(1.0f, 0.0f, 0.0f);
     float4 unit_dir = normalize(direction); 
 
     float t = 0.5f * (unit_dir.y + 1.0f);
@@ -507,6 +508,138 @@ __device__ float4 sampleSky(float4 direction)
     float4 sun_final = sun_base * sun_intensity * sun_factor;
 
     return sky_color;
+}
+
+__global__ void Li_naive_unidirectional (curandState* rngStates, Camera camera, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, int maxDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
+    Triangle* lights, int lightNum, int numSample, bool useMIS, int w, int h, float4* colors)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= w || y >= h) return;
+    int pixelIdx = y*w + x;
+
+    curandState localState = rngStates[pixelIdx];
+
+    Ray r = camera.generateCameraRay(localState, x, y);
+    float4 Li = f4();
+    float4 beta = f4(1.0f);
+    for (int depth = 0; depth < maxDepth; depth++)
+    {
+        Intersection intersect;
+        BVHSceneIntersect(r, BVH, BVHindices, vertices, scene, intersect);
+
+        if (!intersect.valid)
+        {
+            Li += beta * sampleSky(r.direction);
+            break;
+        }
+
+        
+
+        float4 toSurface_local;
+        float4 toNext_local;
+        toLocal(r.direction, intersect.normal, toSurface_local);
+        if (isnan(toSurface_local.x) || isnan(toSurface_local.y) || isnan(toSurface_local.z)) {
+            printf("NaN DETECTED ON toSurfaceLocal: (%f, %f, %f) at depth %d\n local: (%f, %f, %f)\n normal: (%f, %f, %f)\n\n", 
+                r.direction.x, r.direction.y, r.direction.z, depth, toSurface_local.x, toSurface_local.y, toSurface_local.z, intersect.normal.x, intersect.normal.y, intersect.normal.z);
+        }
+        float4 f_val;
+        float pdf;
+        sample_f_eval(localState, materials, intersect.materialID, textures, toSurface_local, 1.0f, 1.0f, intersect.backface, toNext_local, f_val, pdf, intersect.uv);
+
+        if (pdf <= 0.0f || lengthSquared(f_val) < EPSILON) break;
+
+        Li += intersect.emission * beta;
+
+        beta *= f_val * fabsf(toNext_local.z) / pdf;
+
+        float4 toNext_world;
+        toWorld(toNext_local, intersect.normal, toNext_world);
+
+        r.origin = intersect.point + ((toNext_local.z > 0.0f) ? (intersect.normal * RAY_EPSILON) : (-intersect.normal * RAY_EPSILON));
+        r.direction = toNext_world;
+    }
+    colors[pixelIdx] += Li;
+    rngStates[pixelIdx] = localState;
+}
+
+__host__ void launch_naive_unidirectional(int maxDepth, Camera camera, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
+    Triangle* lights, int lightNum, int numSample, bool useMIS, int w, int h, float4* colors)
+{
+    dim3 blockSize(16, 16);  
+    dim3 gridSize((w+15)/16, (h+15)/16);
+    curandState* d_rngStates;
+    cudaMalloc(&d_rngStates, w * h * sizeof(curandState));
+
+    unsigned long seed = 103033UL;
+    initRNG<<<gridSize, blockSize>>>(d_rngStates, w, h, seed);
+    cudaDeviceSynchronize();
+
+    size_t freeB, totalB;
+    cudaMemGetInfo(&freeB, &totalB);
+    printf("Free: %.2f MB of %.2f MB\n",
+            freeB / (1024.0*1024),
+            totalB / (1024.0*1024));
+    
+    auto lastSaveTime = std::chrono::steady_clock::now();
+    float saveIntervalSeconds = 5.0f;
+    Image image = Image(w, h);
+
+    std::cout << "Running Kernels" << std::endl;
+    
+    for (int currSample = 0; currSample < numSample; currSample++)
+    {
+        Li_naive_unidirectional<<<gridSize, blockSize>>>(d_rngStates, camera, materials, textures, BVH, BVHindices, maxDepth, vertices, vertNum, scene, triNum, 
+            lights, lightNum, numSample, useMIS, w, h, colors);
+        
+        cudaDeviceSynchronize();
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastSaveTime).count();
+
+        if (elapsed >= saveIntervalSeconds) 
+        {
+            std::vector<float4> h_colors(w * h);
+            cudaMemcpy(h_colors.data(), colors, w * h * sizeof(float4), cudaMemcpyDeviceToHost);
+
+            for (int i = 0; i < w; i++)
+            {
+                for (int j = 0; j < h; j++)
+                {
+                    if (isnan(h_colors[i].x) || isnan(h_colors[i].y) || isnan(h_colors[i].z)) {
+                        h_colors[i] = f4(1.0f, 0.0f, 1.0f); // Bright Pink for NaN
+                    }
+                    if (isinf(h_colors[i].x) || isinf(h_colors[i].y) || isinf(h_colors[i].z)) {
+                        h_colors[i] = f4(0.0f, 1.0f, 0.0f); // Bright Green for Inf
+                    }
+                    if (h_colors[image.toIndex(i, j)].x < 0 || h_colors[image.toIndex(i, j)].y < 0 || h_colors[image.toIndex(i, j)].z < 0)
+                        cout << i << ", " << j << " Negative color written: <" << h_colors[image.toIndex(i, j)].x << ", " << h_colors[image.toIndex(i, j)].y << ", " 
+                        << h_colors[image.toIndex(i, j)].z << ">"<< endl;
+                    
+                    image.setColor(i, j, h_colors[image.toIndex(i, j)] / (float)(currSample + 1));
+                }
+            }
+            std::string filename = "render.bmp";
+            image.saveImageBMP(filename);
+            image.saveImageCSV_MONO(0);
+            lastSaveTime = now;
+            printf("saved progress at %d samples.\n", currSample);
+        }
+
+    }
+    
+    cudaDeviceSynchronize();
+    cudaFree(d_rngStates);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "RENDER ERROR: CUDA Error code: " << static_cast<int>(err) << std::endl;
+        // only call this if the code isn't catastrophic
+        if (err != cudaErrorAssert && err != cudaErrorUnknown)
+            std::cerr << cudaGetErrorString(err) << std::endl;
+    }
+    else
+        std::cout << "Render executed with no CUDA error" << std::endl;
 }
 
 __global__ void Li_unidirectional (curandState* rngStates, Camera camera, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, int maxDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
@@ -768,7 +901,7 @@ __global__ void Li_unidirectional (curandState* rngStates, Camera camera, Materi
             }
             
         }
-        Li = f4(fmaxf(Li.x, 0.0f), fmaxf(Li.y, 0.0f), fmaxf(Li.z, 0.0f));
+        //Li = f4(fmaxf(Li.x, 0.0f), fmaxf(Li.y, 0.0f), fmaxf(Li.z, 0.0f));
         colorSum += Li;
     }
     colors[pixelIdx] = colorSum;
@@ -838,15 +971,11 @@ __device__ bool BDPTnextEventEstimation(curandState& localState, Material* mater
         float4 surfaceToLight_unit = normalize(surfaceToLight);
 
         float distanceSQR = lengthSquared(surfaceToLight);
+        distanceSQR = fmaxf(distanceSQR, RAY_EPSILON);
 
         Ray r = Ray(shadingPos + shadingPos_normal * RAY_EPSILON, surfaceToLight_unit);
 
         float distance = sqrtf(distanceSQR);
-
-        if (distanceSQR < RAY_EPSILON) {
-            contribution = f4(0.0f);
-            return true; // Treat as occluded
-        }
 
         float4 throughputScale = f4(1.0f);
         BVHShadowRay(r, BVH, BVHindices, vertices, scene, materials, throughputScale, distance - RAY_EPSILON, l.triInd);
@@ -863,6 +992,11 @@ __device__ bool BDPTnextEventEstimation(curandState& localState, Material* mater
             float cosThetaSurface = fabsf(dot(shadingPos_normal, surfaceToLight_unit));
 
             float G = cosThetaLight * cosThetaSurface / distanceSQR;
+
+            float maxG = 2.0f;
+            if (G > maxG) {
+                G = maxG; 
+            }
 
             float area = 0.5f * length(cross3(bpos - apos, cpos - apos));
 
@@ -1005,9 +1139,11 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
             // This variable tracks the ratio of probabilities for the entire path history.
             float ratio = pdfRev_area / pdfFwd_area;
 
+            float connectionStrategy = eyePath->isDelta[prevIdx] ? 0.0f : 1.0f;
+
             // 6. Calculate Final Weight for this strategy
             // This is the final weight!
-            eyePath->misWeight[currIdx] = 1.0f / (1.0f + ratio * ratio * (1.0f + eyePath->misWeight[prevIdx]));
+            eyePath->misWeight[currIdx] = 1.0f / (1.0f + ratio * ratio * (connectionStrategy + eyePath->misWeight[prevIdx]));
 
             // 7. Final Contribution
             float4 Le = sampleSky(r.direction);
@@ -1020,7 +1156,7 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
 
 
             //debugPrintPath(w, h, x, y, pathLength, *eyePath);
-            printf("+1\n");
+            //printf("+1\n");
             return;
         }
         float4 geomN = intersect.normal;
@@ -1052,7 +1188,7 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
         // calculate forward pdf (previous vertex to current)
         //---------------------------------------------------------------------------------------------------------------------------------------------------
 
-        float distanceSQR = fmaxf(lengthSquared(wo_world), 0.01f);
+        float distanceSQR = fmaxf(lengthSquared(wo_world), RAY_EPSILON);
 
         // previous pdf (solid angle) * abs of dot product of current normal with incoming direction into the current surface divided by distance squared
         float pdfFwd_area = prevPDF_solidAngle * fabsf(wo_local.z) / distanceSQR;
@@ -1130,13 +1266,28 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
 
         currThroughput = currThroughput * f_val * fabsf(wi_local.z) / pdfFwd_solidAngle;
         float nextWeight;
+        float currWeight = eyePath->misWeight[currIdx];
 
+        if (eyePath->isDelta[currIdx])
+        {
+            nextWeight = currWeight;
+        }
+        else
+        {
+            float ratio = (depth == 1) ? (pdfRev_area/pdfFwd_area) : (numer/denom);
+
+            nextWeight = ratio * ratio * (1.0f + currWeight);
+        }
+        
+
+        /*
         if (eyePath->isDelta[prevIdx])
             nextWeight = 0.0f;
         else if (depth == 1)
             nextWeight = (pdfRev_area/pdfFwd_area) * (pdfRev_area/pdfFwd_area) * (1.0f + eyePath->misWeight[prevIdx]);
         else
             nextWeight = (numer/denom) * (numer/denom) * (1.0f + eyePath->misWeight[prevIdx]);
+        */
 
         if (depth + 1 < maxDepth) {
             int nextIdx = pathBufferIdx(w, h, x, y, depth + 1);
@@ -1173,7 +1324,7 @@ __device__ void generateFirstLightPathVertex(curandState& localState, int maxDep
     //int lightInd = min(static_cast<int>(curand_uniform(&localState) * totalLightNum), totalLightNum - 1);
     
     float pdf_chooseLight = 1.0f / ((float)totalLightNum);
-    lightPath->uv[firstIdx] = f2(0.0f); // THIS MAY BE AN ISSUE IF YOU ARE DEBUGGING, PLEASE MENTION THIS
+    lightPath->uv[firstIdx] = f2(0.0f);
     lightPath->backface[firstIdx] = false;
     
     if (lightInd != -1)
@@ -1273,12 +1424,12 @@ __device__ void generateFirstLightPathVertex(curandState& localState, int maxDep
         lightPath->lightInd[firstIdx] = -1; // the sky
         lightPath->isDelta[firstIdx] = false; // the sky
 
-        // pdfRev is 0.0f
-        float pdfFwd_val = pdf_chooseLight * pdf_pos * pdf_dir;
+        float pdfFwd_full = pdf_chooseLight * pdf_pos * pdf_dir;
+        float pdfFwd_val = pdf_chooseLight * pdf_pos;
         lightPath->pdfFwd[firstIdx] = pdfFwd_val;
         
         float4 Le = sampleSky(-dir_in);
-        lightPath->beta[firstIdx] = Le / pdfFwd_val;
+        lightPath->beta[firstIdx] = Le / pdfFwd_full;
         //lightPath->beta[firstIdx] = f4(1.0f) / pdfFwd_val;
 
         lightPath->misWeight[firstIdx] = 0.0f;
@@ -1307,18 +1458,6 @@ __device__ void generateLightPath(curandState& localState, Material* materials, 
 
     r.origin = lightPath->pt[firstIdx] + lightPath->n[firstIdx] * RAY_EPSILON;
     r.direction = start_wi;
-
-    // calculate ratio for second vertex:
-
-    float v2Numer = lightPath->pdfFwd[firstIdx]; // if v1 nee'd v0
-    float v2Denom; // if v0 emmitted towards v1
-
-    if (lightPath->lightInd[firstIdx] == -1)
-    {
-        v2Denom = lightPath->pdfFwd[firstIdx];
-    }
-    
-
 
     for (int depth = 1; depth < maxDepth; depth++)
     {
@@ -1367,7 +1506,7 @@ __device__ void generateLightPath(curandState& localState, Material* materials, 
         // calculate forward pdf (previous vertex to current)
         //---------------------------------------------------------------------------------------------------------------------------------------------------
 
-        float distanceSQR = lengthSquared(wo_world);
+        float distanceSQR = fmaxf(lengthSquared(wo_world), RAY_EPSILON);
 
         // previous pdf (solid angle) * abs of dot product of current normal with incoming direction into the current surface divided by distance squared
         float pdfFwd_area; 
@@ -1453,7 +1592,8 @@ __device__ void generateLightPath(curandState& localState, Material* materials, 
         toWorld(wi_local, intersect.normal, wi_world);
         // wi is not stored
 
-        if (lengthSquared(scene[intersect.triIDX].emission) > EPSILON)
+        //if (lengthSquared(scene[intersect.triIDX].emission) > EPSILON)
+        if (false)
         {
             lightPath->lightInd[currIdx] = scene[intersect.triIDX].lightInd;
         }
@@ -1466,14 +1606,48 @@ __device__ void generateLightPath(curandState& localState, Material* materials, 
             break;
 
         currThroughput = currThroughput * f_val * fabsf(wi_local.z) / pdfFwd_solidAngle;
-        float nextWeight;
 
-        if (lightPath->isDelta[prevIdx])
-            nextWeight = 0.0f;
-        else if (depth == 1)
-            nextWeight = (pdfRev_area/pdfFwd_area) * (pdfRev_area/pdfFwd_area) * (1.0f + lightPath->misWeight[prevIdx]);
+        if (depth == 1)
+        {
+            float v1Numer;
+            float v1Denom;
+
+            if (lightPath->lightInd[firstIdx] != -1)
+            {
+                v1Numer = 1.0f; // effectively (P_pos / P_pos)
+        
+                float pdf_emission_solidAngle = dot(start_wi, lightPath->n[firstIdx]) / PI; 
+
+                float G = fabsf(currentToPrev_local.z) / distanceSQR;
+
+                v1Denom = pdf_emission_solidAngle * G;
+            }
+            else
+            {
+                //float pdf_rev_solidAngle = 1.0f / (4.0f * PI); 
+                //float pdf_fwd_solidAngle = lightPath->pdfFwd[firstIdx] * 1.0f / (4.0f * PI);
+
+                // directional pdfs cancel out. this simplifies to the area of the virtual disc, but were doing this ratio still for clarity
+                v1Numer = 1.0f;
+                v1Denom = lightPath->pdfFwd[firstIdx];
+            }
+
+            lightPath->misWeight[currIdx] = (v1Numer / v1Denom) * (v1Numer / v1Denom);
+        }
+
+        float nextWeight;
+        float currWeight = lightPath->misWeight[currIdx];
+
+        if (lightPath->isDelta[currIdx])
+        {
+            nextWeight = currWeight;
+        }
         else
-            nextWeight = (numer/denom) * (numer/denom) * (1.0f + lightPath->misWeight[prevIdx]);
+        {
+            float ratio = (depth == 1) ? (pdfRev_area/pdfFwd_area) : (numer/denom);
+
+            nextWeight = ratio * ratio * (1.0f + currWeight);
+        }
 
         if (depth + 1 < maxDepth) {
             int nextIdx = pathBufferIdx(w, h, x, y, depth + 1);
@@ -1565,29 +1739,49 @@ __global__ void lightPathTracing (curandState* rngStates, Camera camera, PathVer
             toLocal(lightToCamera_unit, lightPath->n[lightPathIDX], out_of_light_local);
 
             float4 light_f;
-            f_eval(materials, lightPath->materialID[lightPathIDX], textures, toLight_local, out_of_light_local, etaI, etaT, light_f, lightPath->uv[lightPathIDX]);
 
-            float distanceSQR = lengthSquared(lightToCamera);
+            if (s == 1)
+            {
+                light_f = f4(1.0f/PI); // since we initialized beta with a pi factor
+            }
+            else
+            {
+                f_eval(materials, lightPath->materialID[lightPathIDX], textures, toLight_local, out_of_light_local, etaI, etaT, light_f, lightPath->uv[lightPathIDX]);
+            }
+            
+            float distanceSQR = fmaxf(lengthSquared(lightToCamera), RAY_EPSILON);
             float G = (cosAtLight * cosAtCamera) / distanceSQR;
 
             float aspect = (float)w / (float)h;
             float halfH = camera.fovScale;
             float halfW = halfH * aspect;
             float sensorArea = (2.0f * halfW) * (2.0f * halfH);
+            float pixelArea = sensorArea / (float)(w * h);
             
-            float We = 1.0f / (sensorArea * cosAtCamera * cosAtCamera * cosAtCamera);
+            //float We = distanceSQR / (sensorArea * cosAtCamera * cosAtCamera * cosAtCamera);
+            float We = 1.0f / (pixelArea * cosAtCamera * cosAtCamera * cosAtCamera);
             float4 contribution = lightPath->beta[lightPathIDX] * light_f * G * throughputScale * We; // unweighted
 
+            //float pdf_eye = cosAtLight / (sensorArea * cosAtCamera * cosAtCamera * cosAtCamera);
             float pdf_eye = cosAtLight / (distanceSQR * sensorArea * cosAtCamera * cosAtCamera * cosAtCamera);
             float pdf_light = lightPath->pdfFwd[lightPathIDX];
 
             float ratio = pdf_eye / pdf_light;
 
+            if (s > 1) 
+            {
+                int prevIdx = pathBufferIdx(w, h, x, y, s - 2); 
+                if (lightPath->isDelta[prevIdx])
+                {
+                    ratio = 0.0f; // The Eye Strategy is impossible, regardless of how easily it hits the floor.
+                }
+            }
+
             float misWeight = 1.0f / (1.0f + (ratio) * (ratio) * (1.0f + lightPath->misWeight[lightPathIDX]));
 
             float4 weightedContribution = contribution * misWeight;
             //weightedContribution = fminf4(weightedContribution, f4(3.0f));
-            //printf("%f\n", lightPath->misWeight[lightPathIDX]);
+            //printf("%f\n", misWeight);
 
             //weightedContribution = f4(logf(1.0f + (1.0f + (ratio) * (1.0f + lightPath->misWeight[lightPathIDX]))) / logf(1.0f + 5000.0f));
             //weightedContribution = f4((1.0f + (ratio) * (1.0f + lightPath->misWeight[lightPathIDX])) / 28000.0f);
@@ -1596,6 +1790,15 @@ __global__ void lightPathTracing (curandState* rngStates, Camera camera, PathVer
             //weightedContribution = f4(misWeight);
             //weightedContribution = f4(ratio / 20.0f);
             //weightedContribution = contribution;
+
+            
+            if (!BDPT_DOMIS)
+                weightedContribution = contribution;
+            
+            if (BDPT_PAINTWEIGHT)
+                weightedContribution = f4(misWeight);
+            else
+                weightedContribution = weightedContribution / (float)(w * h);
 
             if (BDPT_LIGHTTRACE)
             {
@@ -1680,7 +1883,7 @@ __device__ bool connectPath(curandState& localState, int t, int s, int x, int y,
         toLocal(eyeToLight_unit, eyePath->n[eyePathIDX], eyeToLight_local);
         if (lightInd != -1)
         {
-            float distanceSQR = lengthSquared(eyeToLight);
+            float distanceSQR = fmaxf(lengthSquared(eyeToLight), RAY_EPSILON);
             float pdf_eyeToLight_solidAngle;
 
             pdf_eval(materials, eyePath->materialID[eyePathIDX], textures, toShadingPos_local, eyeToLight_local, etaI, etaT, pdf_eyeToLight_solidAngle, eyePath->uv[eyePathIDX]);
@@ -1721,7 +1924,7 @@ __device__ bool connectPath(curandState& localState, int t, int s, int x, int y,
     {
         if (!BDPT_NAIVE)
             return true;
-        float eye_misWeight = eyePath->misWeight[eyePathPREVIDX];
+        float eye_misWeight = eyePath->misWeight[eyePathIDX];
         if (t == eyePathLength && (eyePath->lightInd[eyePathIDX] == -1)) // path terminated on the sky. We need to add the sky contribution (stored in beta)
         {
             //printf("Sky hit encountered at %d, %d, t=%d\n", x, y, t);
@@ -1749,7 +1952,7 @@ __device__ bool connectPath(curandState& localState, int t, int s, int x, int y,
             {
                 if (eyePath->isDelta[eyePathPREVIDX])
                 {
-                    misWeight = 1.0f; // since nee would be impossible
+                    misWeight = 1.0f / (1.0f + eye_misWeight);
                 }
                 else
                 {
@@ -1765,6 +1968,7 @@ __device__ bool connectPath(curandState& localState, int t, int s, int x, int y,
                     float pdf_choose_light_AREA = pdf_chooseLight / area;
                     
                     float ratio = pdf_choose_light_AREA/pdf_prev_to_current;
+
                     misWeight = 1.0f / (1.0f + ratio * ratio * (1.0f + eye_misWeight));
                     if (misWeight > 0.2f)
                     {
@@ -1773,6 +1977,8 @@ __device__ bool connectPath(curandState& localState, int t, int s, int x, int y,
                         
                 }
                 contribution = Le * eyePath->beta[eyePathIDX];
+
+                
                 if (eyePath->isDelta[eyePathPREVIDX])
                 {
                     float lum = luminance(contribution);
@@ -1804,12 +2010,12 @@ __device__ bool connectPath(curandState& localState, int t, int s, int x, int y,
     // Connect a vertex from the Eye Path (eyePathIDX) to a vertex from the Light Path (lightPathIDX)
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     
-    if (BDPT_CONNECTION)
+    if ( s > 1 && t > 1 && BDPT_CONNECTION)
     {
         // 1. Setup Connection Vectors
         // Direction from Eye Vertex -> Light Vertex
         float4 diff = lightPath->pt[lightPathIDX] - eyePath->pt[eyePathIDX]; 
-        float distSq = lengthSquared(diff);
+        float distSq = fmaxf(lengthSquared(diff), RAY_EPSILON);
         float dist = length(diff);
         float4 dir = diff / dist; // Normalized direction: Eye -> Light
 
@@ -1827,39 +2033,23 @@ __device__ bool connectPath(curandState& localState, int t, int s, int x, int y,
 
         // Validate Light Vertex
         bool lightValid = false;
-        if (materials[lightPath->materialID[lightPathIDX]].thinWalled) {
-            lightValid = (fabsf(cosLight) > EPSILON); // Translucent: can emit from either side
-        } else {
-            lightValid = (cosLight > EPSILON);        // Opaque: must emit from front face
-        }
+
+        lightValid = (cosLight > EPSILON);
 
         // Validate Eye Vertex
         bool eyeValid = false;
-        if (materials[eyePath->materialID[eyePathIDX]].thinWalled) {
-            eyeValid = (fabsf(cosEye) > EPSILON);     // Translucent: can receive on either side
-        } else {
-            eyeValid = (cosEye > EPSILON);            // Opaque: must receive on front face
-        }
+        eyeValid = (cosEye > EPSILON);
 
         // If geometry allows connection
         if (lightValid && eyeValid) 
         {
-            // 3. Visibility Check (Shadow Ray)
-            // Ray Origin: Eye Vertex + epsilon. Ray Direction: Eye -> Light.
-            // Max Distance: dist - epsilon (Stop just before hitting the light vertex geometry)
+            // currently connections cannot happen through transmissive materials
             Ray r = Ray(eyePath->pt[eyePathIDX] + eyePath->n[eyePathIDX] * RAY_EPSILON, dir);
             
-            // If the eye vertex expects light from below (refraction), flip the offset
-            if (cosEye < 0.0f) {
-                r.origin = eyePath->pt[eyePathIDX] - eyePath->n[eyePathIDX] * RAY_EPSILON;
-            }
 
             float4 throughputScale;
-            // Check visibility. Returns occlusion status or transmission color in throughputScale.
-            // pass -1 for ignoreID if you don't need to ignore specific geometry, or use logic from NEE
-            BVHShadowRay(r, BVH, BVHindices, vertices, scene, materials, throughputScale, dist - 2.0f * RAY_EPSILON, -1);
+            BVHShadowRay(r, BVH, BVHindices, vertices, scene, materials, throughputScale, dist - RAY_EPSILON, -1);
 
-            // If the shadow ray wasn't fully blocked (magnitude of throughput > 0)
             if (lengthSquared(throughputScale) > EPSILON)
             {
                 // 4. Evaluate BSDFs and PDFs
@@ -1904,13 +2094,17 @@ __device__ bool connectPath(curandState& localState, int t, int s, int x, int y,
                 // 5. Calculate Contribution and Weights
                 // Geometric term G = |cosAtEye * cosAtLight| / dist^2
                 float G = fabsf(cosEye * cosLight) / distSq;
+                float maxG = 2.0f;
+                if (G > maxG) {
+                    G = maxG; 
+                }
 
                 // Convert Solid Angle PDFs to Area PDFs
                 // PDF(Eye->Light) in Area Measure at Light Vertex = PDF_Solid * cosAtLight / dist^2
                 pdf_eyeToLight_area = pdf_eyeToLight_solidAngle * fabsf(cosLight) / distSq;
 
                 // PDF(Light->Eye) in Area Measure at Eye Vertex = PDF_Solid * cosAtEye / dist^2
-                float pdf_lightToEye_area = pdf_lightToEye_solidAngle * fabsf(cosEye) / distSq;
+                pdf_lightToEye_area = pdf_lightToEye_solidAngle * fabsf(cosEye) / distSq;
 
                 // Unweighted contribution
                 // (EyePathThroughput * LightPathThroughput * f_eye * f_light * G * ShadowRayThroughput)
@@ -1921,15 +2115,17 @@ __device__ bool connectPath(curandState& localState, int t, int s, int x, int y,
                 float eye_misWeight = eyePath->misWeight[eyePathIDX];
                 float light_misWeight = lightPath->misWeight[lightPathIDX];
 
-                float pdf_eyeToLight_sq = pdf_eyeToLight_area * pdf_eyeToLight_area;
-                float pdf_lightToEye_sq = pdf_lightToEye_area * pdf_lightToEye_area;
+                float pdf_eye_fwd = eyePath->pdfFwd[eyePathIDX];
+                float pdf_light_fwd = lightPath->pdfFwd[lightPathIDX];
 
-                // Weight calculation (Power Heuristic / Balance Heuristic logic)
-                // weightL represents the probability ratio if we had extended the light path one more step
-                float weightL = light_misWeight * pdf_eyeToLight_sq;
-                
-                // weightE represents the probability ratio if we had extended the eye path one more step
-                float weightE = eye_misWeight * pdf_lightToEye_sq;
+                //float ratioL = pdf_light_fwd / pdf_eyeToLight_area;
+                //float ratioE = pdf_eye_fwd / pdf_lightToEye_area;
+
+                float ratioL = pdf_eyeToLight_area / pdf_light_fwd;
+                float ratioE = pdf_lightToEye_area / pdf_eye_fwd;
+
+                float weightL = (1.0f + light_misWeight) * (ratioL * ratioL);
+                float weightE = (1.0f + eye_misWeight) * (ratioE * ratioE);
 
                 misWeight = 1.0f / (1.0f + weightL + weightE);
                 return true;
@@ -1980,6 +2176,9 @@ __global__ void Li_bidirectional(curandState* rngStates, Camera camera, PathVert
             float4 unweighted_contribution = f4(0.0f); // set in connect path
             float misWeight = 0.0f; // set in connect path
 
+            //if (t != 2 || s != 2)
+            //    continue;
+
             if (!connectPath(localState, t, s, x, y, w, h, eyeDepth, lightDepth, materials, BVH, BVHindices, vertices, scene, lights, lightNum, 
                 textures, sceneRadius, eyePathLength, lightPathLength, eyePath, lightPath, unweighted_contribution, misWeight) && BDPT_DRAWPATH)
             {
@@ -1996,7 +2195,13 @@ __global__ void Li_bidirectional(curandState* rngStates, Camera camera, PathVert
             //fullContribution += unweighted_contribution * misWeight;
             //fullContribution += f4(misWeight);
             //fullContribution += unweighted_contribution;
-            fullContribution += weightedContribution;
+            if (BDPT_DOMIS)
+                fullContribution += weightedContribution;
+            else if (BDPT_PAINTWEIGHT)
+                fullContribution += f4(misWeight);
+            else
+                fullContribution += unweighted_contribution;
+            
             
             
             //fullContribution += unweighted_contribution;
@@ -2012,6 +2217,189 @@ __global__ void Li_bidirectional(curandState* rngStates, Camera camera, PathVert
     rngStates[pixelIdx] = localState;
 }
 
+__global__ void cleanAndFormatImage(
+    float4* accumulationBuffer, // Your raw 'colors' buffer (Sum of samples)
+    float4* overlayBuffer,      // Your 'overlay' buffer
+    float4* outputBuffer,       // A temporary buffer to store the result for saving
+    int w, int h, 
+    int currentSampleCount) 
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idy = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (idx >= w || idy >= h) return;
+
+    int pixelIndex = idy * w + idx;
+
+    // 1. Read the raw accumulated color
+    float4 acc = accumulationBuffer[pixelIndex];
+    float4 ov = overlayBuffer[pixelIndex];
+    float4 finalColor;
+
+    // 2. Check for NaNs/Infs BEFORE normalization
+    if (isnan(acc.x) || isnan(acc.y) || isnan(acc.z)) {
+        finalColor = make_float4(1.0f, 0.0f, 1.0f, 1.0f); // Bright Pink Error
+    } 
+    else if (isinf(acc.x) || isinf(acc.y) || isinf(acc.z)) {
+        finalColor = make_float4(0.0f, 1.0f, 0.0f, 1.0f); // Bright Green Error
+    } 
+    else {
+        // 3. Normalize (Average the samples)
+        float scale = 1.0f / (float)(currentSampleCount + 1);
+        finalColor = make_float4(acc.x * scale, acc.y * scale, acc.z * scale, 1.0f);
+    }
+
+    // 4. Apply Overlay (if present)
+    // Assuming overlay logic: if overlay is NOT black, it overrides the render
+    if (ov.x != 0.0f || ov.y != 0.0f || ov.z != 0.0f) {
+        finalColor = ov;
+    }
+
+    // 5. Write to the output buffer
+    outputBuffer[pixelIndex] = finalColor;
+}
+
+__host__ void launch_bidirectional(int eyeDepth, int lightDepth, Camera camera, PathVertices* eyePath, PathVertices* lightPath, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
+    Triangle* lights, int lightNum, int numSample, int w, int h, float4 sceneCenter, float sceneRadius, float4* colors, float4* overlay)
+{
+    // --- SETUP ---
+    dim3 blockSize(16, 16);  
+    dim3 gridSize((w + 15) / 16, (h + 15) / 16);
+
+    // Create a CUDA Stream (Required for Graphs)
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    // RNG Setup
+    curandState* d_rngStates;
+    cudaMalloc(&d_rngStates, w * h * sizeof(curandState));
+    unsigned long seed = 103033UL;
+    initRNG<<<gridSize, blockSize, 0, stream>>>(d_rngStates, w, h, seed);
+    
+    // Path Lengths
+    int* d_pathLengths = nullptr;
+    cudaMalloc(&d_pathLengths, w * h * sizeof(int));
+    cudaMemsetAsync(d_pathLengths, 0, w * h * sizeof(int), stream);
+
+    // Temporary buffer for saving images (holds the normalized, clean result)
+    float4* d_finalOutput;
+    cudaMalloc(&d_finalOutput, w * h * sizeof(float4));
+
+    // Memory Info Print
+    size_t freeB, totalB;
+    cudaMemGetInfo(&freeB, &totalB);
+    printf("Free: %.2f MB of %.2f MB\n", freeB / (1024.0 * 1024), totalB / (1024.0 * 1024));
+    
+    // Image Object (CPU)
+    Image image = Image(w, h); // Assuming this exists
+    std::vector<float4> h_finalOutput(w * h); // Host buffer for saving
+
+    // Timing
+    auto lastSaveTime = std::chrono::steady_clock::now();
+    float saveIntervalSeconds = 5.0f;
+
+    // --- CUDA GRAPH SETUP ---
+    cudaGraph_t graph;
+    cudaGraphExec_t instance;
+    bool graphCreated = false;
+
+    std::cout << "Starting Render with CUDA Graphs..." << std::endl;
+    
+    for (int currSample = 0; currSample < numSample; currSample++)
+    {
+        // 1. CREATE GRAPH (Only runs on the first iteration)
+        if (!graphCreated) {
+            cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+
+            // Record the core render kernels
+            // Note: We use '0' shared memory and pass the 'stream'
+            lightPathTracing<<<gridSize, blockSize, 0, stream>>>(
+                d_rngStates, camera, eyePath, lightPath, d_pathLengths, materials, textures, BVH, BVHindices, 
+                lightDepth, vertices, vertNum, scene, triNum, lights, lightNum, numSample, w, h, 
+                sceneCenter, sceneRadius, colors, overlay
+            );
+
+            Li_bidirectional<<<gridSize, blockSize, 0, stream>>>(
+                d_rngStates, camera, eyePath, lightPath, d_pathLengths, materials, textures, BVH, BVHindices, 
+                eyeDepth, lightDepth, vertices, vertNum, scene, triNum, lights, lightNum, numSample, w, h, 
+                sceneCenter, sceneRadius, colors, overlay
+            );
+
+            cudaStreamEndCapture(stream, &graph);
+            cudaGraphInstantiate(&instance, graph, NULL, NULL, 0);
+            graphCreated = true;
+        }
+
+        // 2. LAUNCH GRAPH (Fast!)
+        cudaGraphLaunch(instance, stream);
+
+        // 3. CHECK SAVE INTERVAL (Every ~50 samples to save CPU cycles)
+        if (DO_PROGRESSIVERENDER && currSample % 25 == 0) {
+            cudaStreamSynchronize(stream);
+
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastSaveTime).count();
+
+            if (elapsed >= saveIntervalSeconds) 
+            {
+                // Pause the stream to process the image safely
+                cudaStreamSynchronize(stream);
+
+                // Run the helper kernel (Handles NaNs, Normalization, Overlay)
+                cleanAndFormatImage<<<gridSize, blockSize, 0, stream>>>(
+                    colors, overlay, d_finalOutput, w, h, currSample
+                );
+
+                // Copy the clean result to Host
+                cudaMemcpyAsync(h_finalOutput.data(), d_finalOutput, w * h * sizeof(float4), cudaMemcpyDeviceToHost, stream);
+                
+                // Wait for copy to finish
+                cudaStreamSynchronize(stream);
+
+                // Save to Image object (Now trivial loop)
+                #pragma omp parallel for // Optional: OpenMP to speed up this CPU loop
+                for (int i = 0; i < w * h; i++) {
+                    // Convert 1D index to 2D
+                    int x = i % w;
+                    int y = i / w;
+                    // Just set the color directly, no logic needed here!
+                    image.setColor(x, y, h_finalOutput[i]);
+                }
+
+                std::string filename = "render.bmp";
+                image.saveImageBMP(filename);
+                image.saveImageCSV_MONO(0);
+                
+                lastSaveTime = std::chrono::steady_clock::now();
+                printf("Saved progress at %d samples.\n", currSample);
+
+                // Reset overlay if needed (As per your original logic)
+                cudaMemsetAsync(overlay, 0, w * h * sizeof(float4), stream);
+            }
+        }
+    }
+    
+    // Final cleanup
+    cudaStreamSynchronize(stream);
+    
+    // Cleanup resources
+    cudaGraphExecDestroy(instance);
+    cudaGraphDestroy(graph);
+    cudaStreamDestroy(stream);
+    cudaFree(d_pathLengths);
+    cudaFree(d_rngStates);
+    cudaFree(d_finalOutput);
+
+    // Error Checking
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "RENDER ERROR: " << cudaGetErrorString(err) << std::endl;
+    } else {
+        std::cout << "Render executed successfully." << std::endl;
+    }
+}
+
+/*
 __host__ void launch_bidirectional(int eyeDepth, int lightDepth, Camera camera, PathVertices* eyePath, PathVertices* lightPath, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
     Triangle* lights, int lightNum, int numSample, int w, int h, float4 sceneCenter, float sceneRadius, float4* colors, float4* overlay)
 {
@@ -2105,4 +2493,4 @@ __host__ void launch_bidirectional(int eyeDepth, int lightDepth, Camera camera, 
     }
     else
         std::cout << "Render executed with no CUDA error" << std::endl;
-}
+}*/

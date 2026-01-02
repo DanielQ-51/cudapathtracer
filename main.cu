@@ -248,22 +248,23 @@ int main ()
 
     int integratorChoice = BIDIRECTIONAL;
 
-    int w = 1000;
-    int h = 1000;
+    int w = 1280;
+    int h = 1280;
     //int w = 1920;
     //int h = 1080;
 
     int sampleCount = 5000;
-    int maxDepth = 15;
+    int maxDepth = 12;
 
-    int eyePathDepth = 20;
+    int eyePathDepth = 10;
     int lightPathDepth = 12;
     
     int maxLeafSize = 2; // max leaf size for the BVH
 
     //Camera camera = Camera::NotPinhole(f4(-0.5f, -0.55f, 2.4f), w, h, 15.0f, 25.0f, 0.0f, 36.9f, 0.015f, 2.15f);
     //Camera camera = Camera::NotPinhole(f4(0.0f, 0.0f, 1.0f), w, h, 0.0f, 0.0f, 0.0f, 45.0f, 0.015f, 2.15f);
-    Camera camera = Camera::Pinhole(f4(0.0f,0.0f, 1.0f), w, h, 0.0f, 0.0f, 0.0f, 60.0f);
+    Camera camera = Camera::Pinhole(f4(0.0f,0.0f, 1.0f), w, h, 0.0f, 0.0f, 0.0f, 55.0f);
+    //Camera camera = Camera::Pinhole(f4(-1.184f,0.975f, -0.526f), w, h, 13.800f, -48.800f, 0.0f, 60.0f);
     //Camera camera = Camera::Pinhole(f4(-0.1f,0.6f, 1.0f), w, h, -15.0f, 0.0f, 0.0f, 37.0f);
     //Camera camera = Camera::Pinhole(f4(-1.1f,-0.6f, -0.452f), w, h, 14.0f, -60.0f, 0.0f, 70.0f);
 
@@ -274,7 +275,8 @@ int main ()
         cout << "Rendering at " << w << " by " << h << " pixels, with " << 
             sampleCount << " samples per pixel, and a maximum leaf size of " <<
             maxLeafSize << " primitives, with a max depth of " << 
-            maxDepth << "." << endl << endl;
+            maxDepth << ".\nIntegrating with Naive + NEE Unidirectional MIS." << 
+            endl << endl;
     }
     else if (integratorChoice == BIDIRECTIONAL)
     {
@@ -282,7 +284,16 @@ int main ()
             sampleCount << " samples per pixel, and a maximum leaf size of " <<
             maxLeafSize << " primitives, with a max eye depth of " << 
             eyePathDepth << ", and a max light depth of " << 
-            lightPathDepth << "." << endl << endl;
+            lightPathDepth << ".\nIntegrating with Bidirectional." << 
+            endl << endl;
+    }
+    if (integratorChoice == NAIVE_UNIDIRECTIONAL)
+    {
+        cout << "Rendering at " << w << " by " << h << " pixels, with " << 
+            sampleCount << " samples per pixel, and a maximum leaf size of " <<
+            maxLeafSize << " primitives, with a max depth of " << 
+            maxDepth << ".\nIntergating with Naive Unidirectional" << 
+            endl << endl;
     }
 
     float4* out_colors;
@@ -352,7 +363,7 @@ int main ()
     Material lambertGrey = Material::Diffuse(f4(0.8f,0.8f,0.8f));
     Material lambertWhite = Material::Diffuse(f4(0.9f,0.9f,0.9f));
     Material lambertGreen = Material::Diffuse(f4(0.2f,0.6f,0.6f));
-    Material lambertRed = Material::Diffuse(f4(0.99f,0.01f,0.01f));
+    Material lambertRed = Material::Diffuse(f4(0.90f,0.1f,0.1f));
 
     float4 eta_steel = f4(0.14f, 0.16f, 0.13f, 1.0f);   // real part (R,G,B,alpha)
     float4 k_steel   = f4(4.1f, 2.3f, 3.1f, 1.0f);     // imaginary part (absorption)
@@ -417,7 +428,7 @@ int main ()
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     
     
-    readObjSimple("scenedata/smallbox.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 17);
+    readObjSimple("scenedata/smallbox.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 2);
     //readObjSimple("scenedata/box2.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 17);
     //readObjSimple("scenedata/box2.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 17);
     //readObjSimple("scenedata/ballwithholes.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 2);
@@ -431,9 +442,11 @@ int main ()
     //readObjSimple("scenedata/leaves3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 13);
     //readObjSimple("scenedata/leafstem.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 14);
     //readObjSimple("scenedata/Cup.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
-    //readObjSimple("scenedata/waterway3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
-    //readObjSimple("scenedata/cup.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
-    //readObjSimple("scenedata/overlappingboxes.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 2);
+    //readObjSimple("scenedata/waterway3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 10);
+    readObjSimple("scenedata/dragon.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
+    //readObjSimple("scenedata/glassballaroundlight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
+    readObjSimple("scenedata/lightindragon.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), 10.0f*f4(7.0f,2.0f,2.0f), 2);
+    readObjSimple("scenedata/lightindragon2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), 10.0f*f4(2.0f,2.0f,7.0f), 2);
     //readObjSimple("scenedata/mikushiny.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 18);
     //readObjSimple("scenedata/spoon.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 7);
     //readObjSimple("scenedata/swordbetter.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.1f,0.1f), f4(), 3);//5.0f*f4(3.0f,1.0f,1.0f)
@@ -443,9 +456,9 @@ int main ()
     //readObjSimple("scenedata/leftlight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 20.0f*f4(10.0f,1.0f,1.0f), 2);
     //readObjSimple("scenedata/rightlight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 20.0f*f4(3.0f,3.0f,10.0f), 2);
     //readObjSimple("scenedata/reallysmalllight.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 30.0f*f4(7.0f,7.0f,3.0f), 1);
-    //readObjSimple("scenedata/lightforward.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 1.5f*f4(7.0f,7.0f,7.0f), 2);
+    //readObjSimple("scenedata/lightforward.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 1.1f*f4(7.0f,7.0f,7.0f), 2);
     //readObjSimple("scenedata/.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 190.0f*f4(12.0f,12.0f,10.0f), 2);
-    readObjSimple("scenedata/smallwaterlight3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 80.0f*f4(7.0f,7.0f,7.0f), 2);
+    //readObjSimple("scenedata/smallwaterlight3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 50.0f*f4(7.0f,7.0f,7.0f), 2);
     //readObjSimple("scenedata/biglight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.9f*f4(7.0f,7.0f,7.0f), 2);
     //readObjSimple("scenedata/verybiglight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.1f*f4(7.0f,7.0f,7.0f), 2);
     //readObjSimple("scenedata/leaflight2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 2.3f*f4(9.0f,9.0f,7.0f), 2);
@@ -635,9 +648,12 @@ int main ()
         cudaFree(tempPaths1.uv);
         cudaFree(tempPaths1.pdfFwd);
         cudaFree(tempPaths1.backface);
-
-
     }
+    else if (integratorChoice == NAIVE_UNIDIRECTIONAL)
+    {
+        launch_naive_unidirectional(maxDepth, camera, mats_d, textures_d, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, true, w, h, out_colors);
+    }
+
     
 
     //---------------------------------------------------------------------------------------------------------------------------------------------------
@@ -758,7 +774,17 @@ void readObjSimple(string filename, vector<float4>& points, vector<float4>& norm
         else if (prefix == "vn") {
             double x, y, z;
             iss >> x >> y >> z;
-            float4 n = make_float4(x, y, z, 0.0f);
+
+            if (iss.fail() || std::isnan(x) || std::isnan(y) || std::isnan(z)) {
+                normals.push_back(make_float4(0.0f, 1.0f, 0.0f, 0.0f)); // Safe dummy default
+                continue;
+            }
+            float4 n = make_float4((float)x, (float)y, (float)z, 0.0f);
+    
+            float lenSq = n.x*n.x + n.y*n.y + n.z*n.z;
+            if (lenSq < 1e-12f) {
+                n = make_float4(0.0f, 1.0f, 0.0f, 0.0f);
+            }
             normals.push_back(n);
         }
         else if (prefix == "f") {
@@ -799,6 +825,20 @@ void readObjSimple(string filename, vector<float4>& points, vector<float4>& norm
                 int idx0 = vertexIndices[0] + startIndex;
                 int idx1 = vertexIndices[i] + startIndex;
                 int idx2 = vertexIndices[i + 1] + startIndex;
+
+                float4 p0 = points[idx0];
+                float4 p1 = points[idx1];
+                float4 p2 = points[idx2];
+
+                float4 e1 = f4(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
+                float4 e2 = f4(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
+                
+                float4 cp = cross3(e1, e2);
+                float areaSq = dot(cp, cp);
+
+                if (areaSq < 1e-18f) {
+                    continue; 
+                }
 
                 int uv_idx0 = hasUV ? uvIndices[0] + uvStartIndex : -1;
                 int uv_idx1 = hasUV ? uvIndices[i] + uvStartIndex : -1;

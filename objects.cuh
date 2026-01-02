@@ -547,6 +547,7 @@ struct Intersection
 enum IntegratorChoice {
     UNIDIRECTIONAL = 0,
     BIDIRECTIONAL = 1,
+    NAIVE_UNIDIRECTIONAL = 2,
 };
 
 enum MaterialType {
@@ -555,7 +556,8 @@ enum MaterialType {
     MAT_SMOOTHDIELECTRIC = 2,
     MAT_MICROFACETDIELECTRIC = 3,
     MAT_LEAF = 4,
-    MAT_FLOWER = 5
+    MAT_FLOWER = 5,
+    MAT_DELTAMIRROR = 6
 };
 
 struct Material
@@ -729,6 +731,19 @@ struct Material
         m.thinWalled = true;
 
         m.isSpecular = false;
+
+        return m;
+    }
+    
+    __host__ static Material Mirror()
+    {
+        Material m;
+        m.type = MAT_DELTAMIRROR;
+
+        m.hasTexture = false;
+        m.hasTransMap = false;
+
+        m.isSpecular = true;
 
         return m;
     }

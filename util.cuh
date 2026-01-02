@@ -14,11 +14,15 @@ __device__ __constant__ float SKY_RADIUS = 100.0f;
 __device__ __constant__ float MAX_FIREFLY_LUM = 20.0f;
 
 __device__ __constant__ bool BDPT_LIGHTTRACE = true;
-__device__ __constant__ bool BDPT_NEE = false;
-__device__ __constant__ bool BDPT_NAIVE = false;
-__device__ __constant__ bool BDPT_CONNECTION = false;
+__device__ __constant__ bool BDPT_NEE = true;
+__device__ __constant__ bool BDPT_NAIVE = true;
+__device__ __constant__ bool BDPT_CONNECTION = true;
 
 __device__ __constant__ bool BDPT_DRAWPATH = false;
+__device__ __constant__ bool BDPT_DOMIS = true;
+__device__ __constant__ bool BDPT_PAINTWEIGHT = false;
+
+constexpr bool DO_PROGRESSIVERENDER = true;
 
 inline __host__ __device__ __forceinline__ float4 f4(float x, float y, float z, float w = 0.0f) {
     return make_float4(x, y, z, w);

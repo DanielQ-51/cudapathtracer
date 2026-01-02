@@ -36,6 +36,25 @@ __device__ void cosine_sample_f(curandState& localState, const float4& baseColor
     cosine_pdf(wo, pdf);
 }
 
+__device__ void mirror_f(float4& f_val)
+{
+    f_val = f4(1.0f);
+}
+
+__device__ void mirror_pdf(float& pdf)
+{
+    pdf = 1.0f;
+}
+
+__device__ void mirror_sample_f(curandState& localState, const float4& baseColor, float4 wi, float4& wo, float4& f_val, float& pdf)
+{
+    wo = f4(-wi.x, -wi.y, wi.z);
+    f_val = f4(1.0f);
+    pdf = 1.0f;
+}
+
+
+
 __device__ float D_GGX(const float4& h, float alpha) 
 {
     float cosThetaH = h.z;
@@ -265,6 +284,11 @@ __device__ void smooth_dielectric_pdf(
 __device__ void dumb_smooth_dielectric_sample_f(curandState& localState,
     const float4& wi, float etaSurface, bool backface, float4& wo, float4& f_val, float& pdf)
 {
+    if (isnan(wi.x) || isnan(wi.y) || isnan(wi.z)) {
+        printf("NaN DETECTED ON INPUT WI: (%f, %f, %f)\n", wi.x, wi.y, wi.z);
+        // Return dummy data to prevent driver crash downstream
+        wo = f4(0,0,1); f_val = f4(0); pdf = 0; return; 
+    }
     float etaI, etaT;
     if (backface)
     {
@@ -277,28 +301,41 @@ __device__ void dumb_smooth_dielectric_sample_f(curandState& localState,
         etaT = etaSurface;
     }
 
-    float cosThetaI = wi.z; // always pos
+    float cosThetaI = fminf(fmaxf(wi.z, EPSILON), 1.0f);
 
     float eta = etaI / etaT;
     float cosThetaT2 = 1.0f - eta * eta * (1.0f - cosThetaI * cosThetaI);
 
     float F;
-    if (cosThetaT2 < 0.0f)
+    
+    F = schlick_fresnel(cosThetaI, etaI, etaT);
+    
+    if (cosThetaT2 < 0.0f || F >= 0.99999f)
     {
         wo = f4(-wi.x, -wi.y, wi.z);
         float cosThetaO = wo.z;
-        f_val = f4(1.0f / cosThetaO);
+        f_val = f4(1.0f / fmaxf(cosThetaO, EPSILON));
         pdf = 1.0f;
+
+        if (isnan(wo.x) || isnan(wo.y) || isnan(wo.z)) {
+            printf("TIR NaN DETECTED ON OUTPUT WO, WI is: (%f, %f, %f)\n", wi.x, wi.y, wi.z);
+            // Return dummy data to prevent driver crash downstream
+            wo = f4(0,0,1); f_val = f4(0); pdf = 0; return; 
+        }
         return;
     }
     
-    F = schlick_fresnel(cosThetaI, etaI, etaT);
-
     if (curand_uniform(&localState) < F) {
         wo = f4(-wi.x, -wi.y, wi.z);
         float cosThetaO = wo.z;
         pdf = F;
-        f_val = f4(F / cosThetaO);
+        f_val = f4(F / fmaxf(cosThetaO, EPSILON));
+
+        if (isnan(wo.x) || isnan(wo.y) || isnan(wo.z)) {
+            printf("REFL NaN DETECTED ON OUTPUT WO, WI is: (%f, %f, %f)\n", wi.x, wi.y, wi.z);
+            // Return dummy data to prevent driver crash downstream
+            wo = f4(0,0,1); f_val = f4(0); pdf = 0; return; 
+        }
     } 
     else {
         float eta = etaI / etaT;
@@ -312,8 +349,15 @@ __device__ void dumb_smooth_dielectric_sample_f(curandState& localState,
         float cosThetaO = wo.z;
 
         // BSDF term
-        f_val = f4((1.0f - F) * eta * eta / fabsf(cosThetaO));
+        float denom = fmaxf(fabsf(cosThetaO), EPSILON);
+        f_val = f4((1.0f - F) * eta * eta / denom);
         pdf = 1.0f - F;
+
+        if (isnan(wo.x) || isnan(wo.y) || isnan(wo.z)) {
+            printf("REFR NaN DETECTED ON OUTPUT WO, WI is: (%f, %f, %f)\n", wi.x, wi.y, wi.z);
+            // Return dummy data to prevent driver crash downstream
+            wo = f4(0,0,1); f_val = f4(0); pdf = 0; return; 
+        }
     }
 }
 
@@ -532,6 +576,9 @@ __device__ void f_eval(const Material* materials, int materialID, float4* textur
 __device__ void sample_f_eval(curandState& localState, const Material* materials, int materialID, float4* textures, 
     const float4& wi, float etaI, float etaT, bool backface, float4& wo, float4& f_val, float& pdf, const float2 uv)
 {
+    if (isnan(wi.x) || isnan(wi.y) || isnan(wi.z)) {
+        //printf("NaN DETECTED ON INPUT WI: (%f, %f, %f)\n", wi.x, wi.y, wi.z);
+    }
     const Material& mat = materials[materialID];
     float4 albedo = mat.albedo;
     if (mat.hasTexture)
