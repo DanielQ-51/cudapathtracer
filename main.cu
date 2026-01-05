@@ -575,8 +575,8 @@ int main ()
         cudaMalloc(&tempPaths.n,          sizeof(float4) * totalEyePathVertices);
         cudaMalloc(&tempPaths.wo,         sizeof(float4) * totalEyePathVertices);
         cudaMalloc(&tempPaths.beta,       sizeof(float4) * totalEyePathVertices);
-        cudaMalloc(&tempPaths.pdfFwd,     sizeof(float) * totalEyePathVertices);
-        cudaMalloc(&tempPaths.misWeight,  sizeof(float) * totalEyePathVertices);
+        cudaMalloc(&tempPaths.d_vcm,     sizeof(float) * totalEyePathVertices);
+        cudaMalloc(&tempPaths.d_vc,  sizeof(float) * totalEyePathVertices);
         cudaMalloc(&tempPaths.isDelta,    sizeof(bool) * totalEyePathVertices);
         cudaMalloc(&tempPaths.lightInd,   sizeof(int) * totalEyePathVertices);
         cudaMalloc(&tempPaths.uv,   sizeof(float2) * totalEyePathVertices);
@@ -587,8 +587,8 @@ int main ()
         cudaMemset(tempPaths.n,          0, sizeof(float4) * totalEyePathVertices);
         cudaMemset(tempPaths.wo,         0, sizeof(float4) * totalEyePathVertices);
         cudaMemset(tempPaths.beta,       0, sizeof(float4) * totalEyePathVertices);
-        cudaMemset(tempPaths.pdfFwd,     0, sizeof(float) * totalEyePathVertices);
-        cudaMemset(tempPaths.misWeight,  0, sizeof(float) * totalEyePathVertices);
+        cudaMemset(tempPaths.d_vcm,     0, sizeof(float) * totalEyePathVertices);
+        cudaMemset(tempPaths.d_vc,  0, sizeof(float) * totalEyePathVertices);
         cudaMemset(tempPaths.isDelta,    0, sizeof(bool) * totalEyePathVertices);
         cudaMemset(tempPaths.lightInd,   0, sizeof(int) * totalEyePathVertices);
         cudaMemset(tempPaths.uv,   0, sizeof(float2) * totalEyePathVertices);
@@ -606,8 +606,8 @@ int main ()
         cudaMalloc(&tempPaths1.n,          sizeof(float4) * totalLightPathVertices);
         cudaMalloc(&tempPaths1.wo,         sizeof(float4) * totalLightPathVertices);
         cudaMalloc(&tempPaths1.beta,       sizeof(float4) * totalLightPathVertices);
-        cudaMalloc(&tempPaths1.pdfFwd,     sizeof(float) * totalLightPathVertices);
-        cudaMalloc(&tempPaths1.misWeight,  sizeof(float) * totalLightPathVertices);
+        cudaMalloc(&tempPaths1.d_vcm,     sizeof(float) * totalLightPathVertices);
+        cudaMalloc(&tempPaths1.d_vc,  sizeof(float) * totalLightPathVertices);
         cudaMalloc(&tempPaths1.isDelta,    sizeof(bool) * totalLightPathVertices);
         cudaMalloc(&tempPaths1.lightInd,   sizeof(int) * totalLightPathVertices);
         cudaMalloc(&tempPaths1.uv,   sizeof(float2) * totalLightPathVertices);
@@ -618,8 +618,8 @@ int main ()
         cudaMemset(tempPaths1.n,          0, sizeof(float4) * totalLightPathVertices);
         cudaMemset(tempPaths1.wo,         0, sizeof(float4) * totalLightPathVertices);
         cudaMemset(tempPaths1.beta,       0, sizeof(float4) * totalLightPathVertices);
-        cudaMemset(tempPaths1.pdfFwd,     0, sizeof(float) * totalLightPathVertices);
-        cudaMemset(tempPaths1.misWeight,  0, sizeof(float) * totalLightPathVertices);
+        cudaMemset(tempPaths1.d_vcm,     0, sizeof(float) * totalLightPathVertices);
+        cudaMemset(tempPaths1.d_vc,  0, sizeof(float) * totalLightPathVertices);
         cudaMemset(tempPaths1.isDelta,    0, sizeof(bool) * totalLightPathVertices);
         cudaMemset(tempPaths1.lightInd,   0, sizeof(int) * totalLightPathVertices);
         cudaMemset(tempPaths1.uv,   0, sizeof(float2) * totalLightPathVertices);
@@ -636,11 +636,11 @@ int main ()
         cudaFree(tempPaths.n);
         cudaFree(tempPaths.wo);
         cudaFree(tempPaths.beta);
-        cudaFree(tempPaths.misWeight);
+        cudaFree(tempPaths.d_vc);
         cudaFree(tempPaths.isDelta);
         cudaFree(tempPaths.lightInd);
         cudaFree(tempPaths.uv);
-        cudaFree(tempPaths.pdfFwd);
+        cudaFree(tempPaths.d_vcm);
         cudaFree(tempPaths.backface);
 
         cudaFree(tempPaths1.materialID);
@@ -648,11 +648,11 @@ int main ()
         cudaFree(tempPaths1.n);
         cudaFree(tempPaths1.wo);
         cudaFree(tempPaths1.beta);
-        cudaFree(tempPaths1.misWeight);
+        cudaFree(tempPaths1.d_vc);
         cudaFree(tempPaths1.isDelta);
         cudaFree(tempPaths1.lightInd);
         cudaFree(tempPaths1.uv);
-        cudaFree(tempPaths1.pdfFwd);
+        cudaFree(tempPaths1.d_vcm);
         cudaFree(tempPaths1.backface);
     }
     else if (integratorChoice == NAIVE_UNIDIRECTIONAL)

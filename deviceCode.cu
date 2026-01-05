@@ -1096,9 +1096,17 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
     prevPDF_solidAngle = 1.0f / (sensorArea * cosAtCamera * cosAtCamera * cosAtCamera);
     prev_cosine = cosAtCamera;
 
-    //eyePath->misWeight[secIdx] = 0.0f; // since the loop writes to the next one, we have to set the first two mis weights
+    // these shouldnt be needed for the first vertex
+    eyePath->d_vc[firstIdx] = 0.0f;
+    eyePath->d_vcm[firstIdx] = 0.0f;
 
-    float runningMisWeight = 0.0f;
+    // Stores the previous denominator for the misWeight ratio. not needed in the first depth
+    float ratioDenom = -1.0f;
+
+    // stores the accumulated mis ratios in the form ratio(1+ratio(1+ratio...))
+    float currMIS = 0.0f;
+
+    //eyePath->misWeight[secIdx] = 0.0f; // since the loop writes to the next one, we have to set the first two mis weights
 
     for (int depth = 1; depth < maxDepth; depth++)
     {
@@ -1174,11 +1182,10 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
         if (intersect.backface)
         {
             eyePath->backface[currIdx] = true;
-            //if (!doubleSided)
-            //    return;
         }
         else
             eyePath->backface[currIdx] = false;
+        
         eyePath->n[currIdx] = geomN;
 
         eyePath->wo[currIdx] = normalize(-r.direction);
@@ -1196,7 +1203,8 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
         // previous pdf (solid angle) * abs of dot product of current normal with incoming direction into the current surface divided by distance squared
         float pdfFwd_area = prevPDF_solidAngle * fabsf(wo_local.z) / distanceSQR;
         eyePath->pdfFwd[currIdx] = pdfFwd_area;
-        float denom = prevPDF_solidAngle * fabsf(wo_local.z);
+        eyePath->d_vcm[currIdx] = pdfFwd_area;
+
 
         //---------------------------------------------------------------------------------------------------------------------------------------------------
         // Scatter to next vertex
@@ -1226,6 +1234,7 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
         float pdfRev_area;
         if (depth == 1)
         {
+            // TODO - THIS IS LIKELY WRONG
             float numPixels = (float)(w * h);
             float pixelArea = sensorArea / numPixels;
 
@@ -1247,14 +1256,48 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
             }
             pdfRev_area = pdfRev_solidAngle * prev_cosine / distanceSQR;
         }
-        float numer = pdfRev_solidAngle * prev_cosine; // unused at depth 1
-        
+        // used in THIS iteration
+        float ratioNumer = pdfRev_solidAngle * prev_cosine / distanceSQR;
         // pdfRev is not stored
 
-        prev_cosine = fabsf(wi_local.z); // update the prev cosine
+        // update the prev cosine
+        prev_cosine = fabsf(wi_local.z);
 
         //---------------------------------------------------------------------------------------------------------------------------------------------------
         // Wrapping it up, self explanatory
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        if (depth == 1) {currMIS = 0.0f;}
+        else if (eyePath->isDelta[currIdx]) {}
+        else
+        {
+            //float ratio = (depth == 1) ? (pdfRev_area/pdfFwd_area) : (numer/denom);
+
+            /*
+            This ratio represents the ratio between the probability to generate the previous vertex v_i-1
+            by scattering backwards from v_i+1 using the bsdf interaction at v_i, over the probability to generate
+            v_i-1 by scattering from v_i-3 using the interaction at v_i-2. 
+            Therefore, it represents
+            p(v_i-1 <- v_i <- v_i+1) / p(v_i-3 -> v_i-2 -> v_i-1)
+            (taken from the implementing vcm paper)
+
+            This makes sense because both describe the probability of generating v_i-1, converted to area density
+            around the surface at v_i-1. This is the most recent full ratio that we can know when connecting v_i,
+            since the pdfs for v_i require knowing where v_i+1 is, and that depends on the type of connection
+            we perform.
+
+            */
+            float ratio = ratioNumer / ratioDenom;
+            currMIS = ratio * ratio * (1.0f + currMIS);
+        }
+        eyePath->misWeight[currIdx] = currMIS;
+
+        // set up the denominator for the next calculation, which calculates the ratio involving v_i's pdfs
+        ratioDenom = prevPDF_solidAngle * fabsf(wo_local.z) / distanceSQR;
+        
+
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // Set up next interaction
         //---------------------------------------------------------------------------------------------------------------------------------------------------
 
         float4 wi_world;
@@ -1273,28 +1316,6 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
             break;
 
         currThroughput = currThroughput * f_val * fabsf(wi_local.z) / pdfFwd_solidAngle;
-        float nextWeight;
-        float currWeight = eyePath->misWeight[currIdx];
-
-        if (eyePath->isDelta[currIdx])
-        {
-            nextWeight = currWeight;
-        }
-        else
-        {
-            float ratio = (depth == 1) ? (pdfRev_area/pdfFwd_area) : (numer/denom);
-
-            nextWeight = ratio * ratio * (1.0f + currWeight);
-        }
-        
-        if (depth + 1 < maxDepth) {
-            int nextIdx = pathBufferIdx(w, h, x, y, depth + 1);
-            eyePath->misWeight[nextIdx] = nextWeight;
-        }
-
-        //---------------------------------------------------------------------------------------------------------------------------------------------------
-        // Set up next interaction
-        //---------------------------------------------------------------------------------------------------------------------------------------------------
 
         bool transmitting = dot(wi_world, eyePath->n[currIdx]) < 0.0f;
 

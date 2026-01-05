@@ -452,8 +452,21 @@ struct PathVertices {
     // accumulated weight up this this vertex
     float* misWeight; 
     
+    /*
+    Equal to (for intermediate vertices):
+
+    G - Geometry factor to convert a reverse pdf into area measure around the previous vertex (cos at prev, distanceSQR from previous)
+    pdfFwd - Forward pdf of generating the current vertex
+    PREVpdfRev - solid angle pdf of generating the vertex before the previous vertex
+    d_vcm for the previous vertex
+    d_vc for the previous vertex
+    */
+    float* d_vc;
+
+    // stores the forward pdf for the previous vertex (area measure)
+    float* d_vcm;
     bool* isDelta;
-    //bool*isLight;
+    
     int* lightInd;
     bool* backface;
 };
@@ -514,8 +527,8 @@ static __device__ __forceinline__ void debugPrintPath(
             PV.wo[idx].x, PV.wo[idx].y, PV.wo[idx].z,
             PV.uv[idx].x, PV.uv[idx].y,
             PV.beta[idx].x, PV.beta[idx].y, PV.beta[idx].z,
-            PV.pdfFwd[idx],
-            PV.misWeight[idx],
+            //PV.pdfFwd[idx],
+            //PV.misWeight[idx],
             PV.isDelta[idx],
             PV.lightInd[idx],
             PV.backface[idx]
