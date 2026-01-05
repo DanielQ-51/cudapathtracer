@@ -248,22 +248,23 @@ int main ()
 
     int integratorChoice = BIDIRECTIONAL;
 
-    int w = 1280;
-    int h = 1280;
+    int w = 1000;
+    int h = 1000;
     //int w = 1920;
     //int h = 1080;
 
-    int sampleCount = 5000;
-    int maxDepth = 12;
+    int sampleCount = 500;
+    int maxDepth = 40;
 
-    int eyePathDepth = 10;
+    int eyePathDepth = 12;
     int lightPathDepth = 12;
     
     int maxLeafSize = 2; // max leaf size for the BVH
 
     //Camera camera = Camera::NotPinhole(f4(-0.5f, -0.55f, 2.4f), w, h, 15.0f, 25.0f, 0.0f, 36.9f, 0.015f, 2.15f);
     //Camera camera = Camera::NotPinhole(f4(0.0f, 0.0f, 1.0f), w, h, 0.0f, 0.0f, 0.0f, 45.0f, 0.015f, 2.15f);
-    Camera camera = Camera::Pinhole(f4(0.0f,0.0f, 1.0f), w, h, 0.0f, 0.0f, 0.0f, 55.0f);
+    Camera camera = Camera::Pinhole(f4(0.0f,0.0f, 1.0f), w, h, 0.0f, 0.0f, 0.0f, 60.0f);
+    //Camera camera = Camera::Pinhole(f4(0.36f,0.0f, 0.3f), w, h, 0.0f, 40.0f, 0.0f, 55.0f);
     //Camera camera = Camera::Pinhole(f4(-1.184f,0.975f, -0.526f), w, h, 13.800f, -48.800f, 0.0f, 60.0f);
     //Camera camera = Camera::Pinhole(f4(-0.1f,0.6f, 1.0f), w, h, -15.0f, 0.0f, 0.0f, 37.0f);
     //Camera camera = Camera::Pinhole(f4(-1.1f,-0.6f, -0.452f), w, h, 14.0f, -60.0f, 0.0f, 70.0f);
@@ -396,6 +397,8 @@ int main ()
     Material leafStem = Material::Diffuse(f4(0.90f, 0.9f, 0.83f));
     Material sky = Material::Diffuse(f4(0.4f, 0.4f, 1.00f));
 
+    Material mirror = Material::Mirror();
+
     mats.push_back(air); // index 0
 
     mats.push_back(lambertBlue); // index 1
@@ -416,7 +419,8 @@ int main ()
     mats.push_back(leafAutumn); // index 16
     mats.push_back(lambertGrey); // index 17
     mats.push_back(diamond); // index 18
-    //mats.push_back(green); // index 16
+    mats.push_back(mirror); // index 19
+    
 
     Material* mats_d;
 
@@ -429,7 +433,8 @@ int main ()
     
     
     readObjSimple("scenedata/smallbox.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 2);
-    //readObjSimple("scenedata/box2.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 17);
+    //readObjSimple("scenedata/box2.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 19);
+    //readObjSimple("scenedata/mothguy.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 4);
     //readObjSimple("scenedata/box2.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 17);
     //readObjSimple("scenedata/ballwithholes.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(), 2);
     //readObjSimple("scenedata/notbox21.obj", points, normals, colors, uvs, mesh, lightsvec, f4(0.9f,0.9f,0.9f), f4(5.0f), 2);
@@ -443,10 +448,10 @@ int main ()
     //readObjSimple("scenedata/leafstem.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 14);
     //readObjSimple("scenedata/Cup.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
     //readObjSimple("scenedata/waterway3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 10);
-    readObjSimple("scenedata/dragon.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
+    //readObjSimple("scenedata/dragon.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
     //readObjSimple("scenedata/glassballaroundlight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
-    readObjSimple("scenedata/lightindragon.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), 10.0f*f4(7.0f,2.0f,2.0f), 2);
-    readObjSimple("scenedata/lightindragon2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), 10.0f*f4(2.0f,2.0f,7.0f), 2);
+    //readObjSimple("scenedata/lightindragon.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), 30.0f*f4(7.0f,2.0f,2.0f), 2);
+    //readObjSimple("scenedata/lightindragon2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), 30.0f*f4(2.0f,2.0f,7.0f), 2);
     //readObjSimple("scenedata/mikushiny.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 18);
     //readObjSimple("scenedata/spoon.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 7);
     //readObjSimple("scenedata/swordbetter.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.1f,0.1f), f4(), 3);//5.0f*f4(3.0f,1.0f,1.0f)
@@ -456,9 +461,10 @@ int main ()
     //readObjSimple("scenedata/leftlight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 20.0f*f4(10.0f,1.0f,1.0f), 2);
     //readObjSimple("scenedata/rightlight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 20.0f*f4(3.0f,3.0f,10.0f), 2);
     //readObjSimple("scenedata/reallysmalllight.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 30.0f*f4(7.0f,7.0f,3.0f), 1);
+    //readObjSimple("scenedata/diamondlight2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 40.0f*f4(7.0f,7.0f,3.0f), 1);
     //readObjSimple("scenedata/lightforward.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 1.1f*f4(7.0f,7.0f,7.0f), 2);
     //readObjSimple("scenedata/.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 190.0f*f4(12.0f,12.0f,10.0f), 2);
-    //readObjSimple("scenedata/smallwaterlight3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 50.0f*f4(7.0f,7.0f,7.0f), 2);
+    readObjSimple("scenedata/smallwaterlight3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 50.0f*f4(7.0f,7.0f,7.0f), 2);
     //readObjSimple("scenedata/biglight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.9f*f4(7.0f,7.0f,7.0f), 2);
     //readObjSimple("scenedata/verybiglight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.1f*f4(7.0f,7.0f,7.0f), 2);
     //readObjSimple("scenedata/leaflight2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 2.3f*f4(9.0f,9.0f,7.0f), 2);

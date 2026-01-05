@@ -36,9 +36,10 @@ __device__ void cosine_sample_f(curandState& localState, const float4& baseColor
     cosine_pdf(wo, pdf);
 }
 
-__device__ void mirror_f(float4& f_val)
+__device__ void mirror_f(float4& f_val, float4 wo)
 {
-    f_val = f4(1.0f);
+    float cos_theta = fmaxf(wo.z, EPSILON);
+    f_val = f4(1.0f / cos_theta);
 }
 
 __device__ void mirror_pdf(float& pdf)
@@ -46,14 +47,13 @@ __device__ void mirror_pdf(float& pdf)
     pdf = 1.0f;
 }
 
-__device__ void mirror_sample_f(curandState& localState, const float4& baseColor, float4 wi, float4& wo, float4& f_val, float& pdf)
+__device__ void mirror_sample_f(float4 wi, float4& wo, float4& f_val, float& pdf)
 {
     wo = f4(-wi.x, -wi.y, wi.z);
-    f_val = f4(1.0f);
+    float cos_theta = fmaxf(wo.z, EPSILON);
+    f_val = f4(1.0f / cos_theta);
     pdf = 1.0f;
 }
-
-
 
 __device__ float D_GGX(const float4& h, float alpha) 
 {
@@ -569,6 +569,10 @@ __device__ void f_eval(const Material* materials, int materialID, float4* textur
     {
         leaf_f(albedo, mat.ior, etaI, mat.roughness, trans, -wi, wo, f_val);
     }
+    else if (mat.type == MAT_DELTAMIRROR)
+    {
+        mirror_f(f_val, wo);
+    }
 }
 
 // For dielectrics, when this function is called, we know whether or not it refracts, and that etaI and etaT are in fact correct
@@ -609,6 +613,10 @@ __device__ void sample_f_eval(curandState& localState, const Material* materials
     {
         leaf_sample_f(localState, -wi, mat.ior, etaI, mat.roughness, albedo, trans, wo, f_val, pdf);
     }
+    else if (mat.type == MAT_DELTAMIRROR)
+    {
+        mirror_sample_f(-wi, wo, f_val, pdf);
+    }
 }
 
 // For dielectrics, when this function is called, we know whether or not it refracts, and that etaI and etaT are in fact correct
@@ -641,5 +649,9 @@ __device__ void pdf_eval(Material* materials, int materialID, float4* textures, 
     else if (mat.type == MAT_LEAF)
     {
         leaf_pdf(mat.ior, etaI, mat.roughness, trans, -wi, wo, pdf);
+    }
+    else if (mat.type == MAT_DELTAMIRROR)
+    {
+        mirror_pdf(pdf);
     }
 }
