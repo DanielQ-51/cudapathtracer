@@ -941,9 +941,11 @@ __device__ bool BDPTnextEventEstimation(curandState& localState, Material* mater
     const float2 uv, float& light_pdf, float4& contribution, float4& shadingPos_to_lightPos, int& lightInd, float& cosLight, float& pdf_emit, 
     float etaI, float etaT, float sceneRadius)
 {
-    int totalLightNum = lightNum + 1; // +1 for the sky
-    lightInd = min(static_cast<int>(curand_uniform(&localState) * totalLightNum), totalLightNum - 1) - 1; // -1 to align it with the convention where -1 is the sky
-    float pdf_chooseLight = 1.0f / (float)totalLightNum;
+    int totalLightNum = SAMPLE_ENVIRONMENT ? (lightNum + 1) : lightNum; // +1 for the sky
+    lightInd = SAMPLE_ENVIRONMENT ? (min(static_cast<int>(curand_uniform(&localState) * (lightNum + 1)), lightNum) - 1) : 
+        (min(static_cast<int>(curand_uniform(&localState) * (lightNum)), lightNum - 1)); 
+    
+    float pdf_chooseLight = 1.0f / ((float) (SAMPLE_ENVIRONMENT ? (lightNum + 1) : lightNum));
 
     if (lightInd != -1)
     {
@@ -978,7 +980,7 @@ __device__ bool BDPTnextEventEstimation(curandState& localState, Material* mater
         float distance = sqrtf(distanceSQR);
 
         float4 throughputScale = f4(1.0f);
-        BVHShadowRay(r, BVH, BVHindices, vertices, scene, materials, throughputScale, distance - RAY_EPSILON, l.triInd);
+        BVHShadowRay(r, BVH, BVHindices, vertices, scene, materials, throughputScale, distance - EPSILON, l.triInd);
 
         if (lengthSquared(throughputScale) > 0.0f)
         {
@@ -1003,7 +1005,7 @@ __device__ bool BDPTnextEventEstimation(curandState& localState, Material* mater
             float pdf_choosePoint_area = 1.0f / area;
             float pdf_chooseLightPoint_area = pdf_choosePoint_area * pdf_chooseLight;
             light_pdf = pdf_chooseLightPoint_area; // nee pdf
-            pdf_emit = pdf_chooseLightPoint_area * cosThetaLight / PI; // emit pdf, directional
+            pdf_emit = cosThetaLight / PI; // emit pdf, directional
 
             //float pdf_chooseLightPoint_solidAngle = pdf_chooseLightPoint_area * distanceSQR / cosThetaLight;
             //light_pdf = pdf_chooseLightPoint_solidAngle;
@@ -1068,16 +1070,12 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
 {
     pathLength = 1;
     Ray r = camera.generateCameraRay(localState, x, y);
-    float prevPDF_solidAngle; // outgoing pdf from scattering functions
-    float prev_cosine; // the previous cosine between the normal and the outgoing ray
     int firstIdx = pathBufferIdx(w, h, x, y, 0);
-    int secIdx = pathBufferIdx(w, h, x, y, 1);
 
     float4 currThroughput = f4(1.0f);
     
     eyePath->pt[firstIdx] = r.origin;
     eyePath->n[firstIdx] = camera.getForwardVector();
-    //eyePath->wo[firstIdx] = -r.direction; // i believe this is not needed/not applicable
     eyePath->beta[firstIdx] = currThroughput;
     eyePath->isDelta[firstIdx] = true; // it is delta meaning the probability of a light path hitting it randomly is zero
 
@@ -1093,6 +1091,9 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
 
     float cosAtCamera = fabsf(dot(camera.getForwardVector(), r.direction)); // r.direction should be normalized already
 
+    float prevPDF_solidAngle; // outgoing pdf from scattering functions
+    float prev_cosine; // the previous cosine between the normal and the outgoing ray
+
     prevPDF_solidAngle = 1.0f / (sensorArea * cosAtCamera * cosAtCamera * cosAtCamera);
     prev_cosine = cosAtCamera;
 
@@ -1100,13 +1101,14 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
     eyePath->d_vc[firstIdx] = 0.0f;
     eyePath->d_vcm[firstIdx] = 0.0f;
 
-    // Stores the previous denominator for the misWeight ratio. not needed in the first depth
-    float ratioDenom = -1.0f;
-
     // stores the accumulated mis ratios in the form ratio(1+ratio(1+ratio...))
     float currMIS = 0.0f;
 
-    //eyePath->misWeight[secIdx] = 0.0f; // since the loop writes to the next one, we have to set the first two mis weights
+    float prev_d_vcm = -1.0f;
+    float prev_d_vc = -1.0f;
+
+    float pdf_onebeforePrevRev_SA = -1.0f;
+    bool prevWasDelta = false;
 
     for (int depth = 1; depth < maxDepth; depth++)
     {
@@ -1115,10 +1117,10 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
         Intersection intersect = Intersection();
         intersect.valid = false;
         BVHSceneIntersect(r, BVH, BVHindices, vertices, scene, intersect);
-        //sceneIntersection(r, vertices, scene, triNum, intersect);
 
         if (!intersect.valid) // treat this as an endpoint
         {
+            /* NOT IMPLEMENTED CORRECTLY FOR VCM STYLE YET
             // 1. Setup Vertex (Endpoint)
             // We place the vertex on the sky sphere for visualization/debugging,
             // but the math below ignores this position and uses the "Virtual Disk" instead.
@@ -1168,6 +1170,7 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
 
             //debugPrintPath(w, h, x, y, pathLength, *eyePath);
             //printf("+1\n");
+            */
             return;
         }
         float4 geomN = intersect.normal;
@@ -1177,7 +1180,9 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
 
         eyePath->materialID[currIdx] = intersect.materialID;
         eyePath->pt[currIdx] = intersect.point;
-        eyePath->isDelta[currIdx] = materials[eyePath->materialID[currIdx]].isSpecular;
+
+        bool currDelta = materials[eyePath->materialID[currIdx]].isSpecular;
+        eyePath->isDelta[currIdx] = currDelta;
 
         if (intersect.backface)
         {
@@ -1203,8 +1208,6 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
         // previous pdf (solid angle) * abs of dot product of current normal with incoming direction into the current surface divided by distance squared
         float pdfFwd_area = prevPDF_solidAngle * fabsf(wo_local.z) / distanceSQR;
         eyePath->pdfFwd[currIdx] = pdfFwd_area;
-        eyePath->d_vcm[currIdx] = pdfFwd_area;
-
 
         //---------------------------------------------------------------------------------------------------------------------------------------------------
         // Scatter to next vertex
@@ -1218,9 +1221,6 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
         float etaT = 1.0f;
 
         sample_f_eval(localState, materials, intersect.materialID, textures, wo_local, etaI, etaT, intersect.backface, wi_local, f_val, pdfFwd_solidAngle, intersect.uv);
-
-        float cameraPdfSolid = prevPDF_solidAngle;
-        prevPDF_solidAngle = pdfFwd_solidAngle; // update the prev pdf
         
         //radiance is conserved through dielectric boundaries, so we dont need to apply a correction like we did for the light path
 
@@ -1232,69 +1232,57 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
 
         float pdfRev_solidAngle;
         float pdfRev_area;
-        if (depth == 1)
-        {
-            // TODO - THIS IS LIKELY WRONG
-            float numPixels = (float)(w * h);
-            float pixelArea = sensorArea / numPixels;
 
-            pdfRev_solidAngle = cameraPdfSolid * numPixels;
-            pdfFwd_area = pdfFwd_area * numPixels; // use pixel scaled version
+        pdf_eval(materials, intersect.materialID, textures, nextToCurrent_local, currentToPrev_local, etaI, etaT, pdfRev_solidAngle, intersect.uv);
 
-            pdfRev_area = pdfRev_solidAngle * fabsf(wo_local.z) / distanceSQR;
-        }
-        else
-        {
-            if (eyePath->isDelta[currIdx])
-            {
-                pdfRev_solidAngle = pdfFwd_solidAngle;
-            }
-            else
-            {
-                // puts a value into pdfRev_solidAngle
-                pdf_eval(materials, intersect.materialID, textures, nextToCurrent_local, currentToPrev_local, etaI, etaT, pdfRev_solidAngle, intersect.uv);
-            }
-            pdfRev_area = pdfRev_solidAngle * prev_cosine / distanceSQR;
-        }
-        // used in THIS iteration
-        float ratioNumer = pdfRev_solidAngle * prev_cosine / distanceSQR;
         // pdfRev is not stored
-
-        // update the prev cosine
-        prev_cosine = fabsf(wi_local.z);
 
         //---------------------------------------------------------------------------------------------------------------------------------------------------
         // Wrapping it up, self explanatory
         //---------------------------------------------------------------------------------------------------------------------------------------------------
 
-        if (depth == 1) {currMIS = 0.0f;}
-        else if (eyePath->isDelta[currIdx]) {}
+        if (depth == 1) {
+            float pdf_connect = 1.0f;
+            float pdf_trace = 1.0f;
+            //float numLightSample = (float) w * (float) h;
+            float numLightSample = 1.0f;
+
+            float vcm = (pdf_connect * numLightSample) / (pdf_trace * pdfFwd_area);
+            float vc = 0.0f;
+
+            eyePath->d_vcm[currIdx] = vcm;
+            eyePath->d_vc[currIdx] = vc;
+
+            prev_d_vcm = vcm;
+            prev_d_vc = vc;
+            pdf_onebeforePrevRev_SA = pdfRev_solidAngle;
+        }
+        else if (prevWasDelta) 
+        {
+            float G = prev_cosine / distanceSQR; // distance to previous vertex
+            float vcm = 0.0f;
+            float vc = (G / pdfFwd_area) * (pdf_onebeforePrevRev_SA * prev_d_vc);
+
+            eyePath->d_vcm[currIdx] = vcm;
+            eyePath->d_vc[currIdx] = vc;
+
+            prev_d_vcm = vcm;
+            prev_d_vc = vc;
+            pdf_onebeforePrevRev_SA = pdfRev_solidAngle;
+        }
         else
         {
-            //float ratio = (depth == 1) ? (pdfRev_area/pdfFwd_area) : (numer/denom);
+            float G = prev_cosine / distanceSQR; // distance to previous vertex
+            float vcm = 1.0f / pdfFwd_area;
+            float vc = (G / pdfFwd_area) * (prev_d_vcm + pdf_onebeforePrevRev_SA * prev_d_vc);
 
-            /*
-            This ratio represents the ratio between the probability to generate the previous vertex v_i-1
-            by scattering backwards from v_i+1 using the bsdf interaction at v_i, over the probability to generate
-            v_i-1 by scattering from v_i-3 using the interaction at v_i-2. 
-            Therefore, it represents
-            p(v_i-1 <- v_i <- v_i+1) / p(v_i-3 -> v_i-2 -> v_i-1)
-            (taken from the implementing vcm paper)
+            eyePath->d_vcm[currIdx] = vcm;
+            eyePath->d_vc[currIdx] = vc;
 
-            This makes sense because both describe the probability of generating v_i-1, converted to area density
-            around the surface at v_i-1. This is the most recent full ratio that we can know when connecting v_i,
-            since the pdfs for v_i require knowing where v_i+1 is, and that depends on the type of connection
-            we perform.
-
-            */
-            float ratio = ratioNumer / ratioDenom;
-            currMIS = ratio * ratio * (1.0f + currMIS);
+            prev_d_vcm = vcm;
+            prev_d_vc = vc;
+            pdf_onebeforePrevRev_SA = pdfRev_solidAngle;
         }
-        eyePath->misWeight[currIdx] = currMIS;
-
-        // set up the denominator for the next calculation, which calculates the ratio involving v_i's pdfs
-        ratioDenom = prevPDF_solidAngle * fabsf(wo_local.z) / distanceSQR;
-        
 
         //---------------------------------------------------------------------------------------------------------------------------------------------------
         // Set up next interaction
@@ -1304,13 +1292,9 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
         toWorld(wi_local, intersect.normal, wi_world);
 
         if (lengthSquared(scene[intersect.triIDX].emission) > EPSILON)
-        {
             eyePath->lightInd[currIdx] = scene[intersect.triIDX].lightInd;
-        }
         else
-        {
             eyePath->lightInd[currIdx] = -51; // -1 is reserved for the sun
-        }
 
         if (pdfFwd_solidAngle < EPSILON)
             break;
@@ -1328,6 +1312,11 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
         r.direction = normalize(wi_world);
 
         pathLength++;
+
+        // update the previous state
+        prev_cosine = fabsf(wi_local.z);
+        prevWasDelta = currDelta;
+        prevPDF_solidAngle = pdfFwd_solidAngle; 
     }
 }
 
@@ -1475,6 +1464,22 @@ __device__ void generateLightPath(curandState& localState, Material* materials, 
 
     r.origin = lightPath->pt[firstIdx] + lightPath->n[firstIdx] * RAY_EPSILON;
     r.direction = start_wi;
+    
+    prev_cosine = fabsf(dot(normalize(start_wi), lightPath->n[firstIdx]));
+    prevPDF_solidAngle = prev_cosine / PI; // emission pdf
+
+    // these shouldnt be needed for the first vertex
+    lightPath->d_vc[firstIdx] = 0.0f;
+    lightPath->d_vcm[firstIdx] = 0.0f;
+
+    // stores the accumulated mis ratios in the form ratio(1+ratio(1+ratio...))
+    float currMIS = 0.0f;
+
+    float prev_d_vcm = -1.0f;
+    float prev_d_vc = -1.0f;
+
+    float pdf_onebeforePrevRev_SA = -1.0f;
+    bool prevWasDelta = false;
 
     for (int depth = 1; depth < maxDepth; depth++)
     {
@@ -1484,29 +1489,25 @@ __device__ void generateLightPath(curandState& localState, Material* materials, 
         Intersection intersect = Intersection();
         intersect.valid = false;
         BVHSceneIntersect(r, BVH, BVHindices, vertices, scene, intersect);
-        //sceneIntersection(r, vertices, scene, triNum, intersect);
 
         if (!intersect.valid)
         {
-            //if ( lightPath->lightInd[firstIdx] != -1)
-            //    debugPrintPath(w, x, y, pathLength, *lightPath);
             return;
         }
             
         lightPath->uv[currIdx] = intersect.uv;
         lightPath->beta[currIdx] = currThroughput;
         float4 geomN = intersect.normal;
-        //bool doubleSided = materials[intersect.materialID].type == MAT_SMOOTHDIELECTRIC || materials[intersect.materialID].type == MAT_LEAF; // or check flag
 
         lightPath->materialID[currIdx] = intersect.materialID;
         lightPath->pt[currIdx] = intersect.point;
-        lightPath->isDelta[currIdx] = materials[lightPath->materialID[currIdx]].isSpecular;
+        
+        bool currDelta = materials[lightPath->materialID[currIdx]].isSpecular;
+        lightPath->isDelta[currIdx] = currDelta;
 
         if (intersect.backface)
         {
             lightPath->backface[currIdx] = true;
-            //if (!doubleSided)
-            //    return;
         }
         else
             lightPath->backface[currIdx] = false;
@@ -1529,16 +1530,7 @@ __device__ void generateLightPath(curandState& localState, Material* materials, 
         float pdfFwd_area; 
         float denom; 
 
-        if (lightPath->lightInd[prevIdx] != -1) // prev was mesh light or actual surface
-        {
-            pdfFwd_area = prevPDF_solidAngle * fabsf(wo_local.z) / distanceSQR;
-            denom = prevPDF_solidAngle * fabsf(wo_local.z);
-        }
-        else // implied that this is depth == 1 as well (the previous was the sky)
-        {
-            pdfFwd_area = lightPath->pdfFwd[prevIdx] * fabsf(wo_local.z);
-            //denom unused in depth == 1
-        }
+        pdfFwd_area = prevPDF_solidAngle * fabsf(wo_local.z) / distanceSQR;
         lightPath->pdfFwd[currIdx] = pdfFwd_area;
         
 
@@ -1565,8 +1557,6 @@ __device__ void generateLightPath(curandState& localState, Material* materials, 
                 f_val *= correction;
             }
         }
-
-        prevPDF_solidAngle = pdfFwd_solidAngle; // update the prev pdf
         
         //---------------------------------------------------------------------------------------------------------------------------------------------------
         // calculate backwards pdf (current vertex to previous)
@@ -1577,34 +1567,10 @@ __device__ void generateLightPath(curandState& localState, Material* materials, 
 
         float pdfRev_solidAngle;
         float pdfRev_area;
-        if (depth == 1)
-        {
-            float pdf_nee_area = lightPath->pdfFwd[prevIdx]; // THIS IS ACCESSING THE FIRST INDEX'S PDF, WHICH HAPPENS TO BE THE SPATIAL NEE PDF
 
-            float pdf_bsdf_SA;
-            pdf_eval(materials, intersect.materialID, textures, nextToCurrent_local, currentToPrev_local, etaI, etaT, pdf_bsdf_SA, intersect.uv);
-
-            float pdf_bsdf_area = pdf_bsdf_SA * prev_cosine / distanceSQR;
-            pdfRev_area = pdf_bsdf_area + pdf_nee_area;
-        }
-        else
-        {
-            if (lightPath->isDelta[currIdx])
-            {
-                pdfRev_solidAngle = pdfFwd_solidAngle;
-            }
-            else
-            {
-                // puts a value into pdfRev_solidAngle
-                pdf_eval(materials, intersect.materialID, textures, nextToCurrent_local, currentToPrev_local, etaI, etaT, pdfRev_solidAngle, intersect.uv);
-            }
-            pdfRev_area = pdfRev_solidAngle * prev_cosine / distanceSQR;
-        }
-        float numer = pdfRev_solidAngle * prev_cosine;
+        pdf_eval(materials, intersect.materialID, textures, nextToCurrent_local, currentToPrev_local, etaI, etaT, pdfRev_solidAngle, intersect.uv);
 
         // pdfRev is not stored
-
-        prev_cosine = fabsf(wi_local.z); // update the prev cosine
 
         //---------------------------------------------------------------------------------------------------------------------------------------------------
         // Wrapping it up, self explanatory
@@ -1614,66 +1580,69 @@ __device__ void generateLightPath(curandState& localState, Material* materials, 
         toWorld(wi_local, intersect.normal, wi_world);
         // wi is not stored
 
-        //if (lengthSquared(scene[intersect.triIDX].emission) > EPSILON)
-        if (false)
-        {
-            lightPath->lightInd[currIdx] = scene[intersect.triIDX].lightInd;
-        }
-        else
-        {
-            lightPath->lightInd[currIdx] = -51; // -1 is reserved for the sun
-        }
+        // we don't store the light index for a light path
 
         if (pdfFwd_solidAngle < EPSILON)
             break;
 
         currThroughput = currThroughput * f_val * fabsf(wi_local.z) / pdfFwd_solidAngle;
 
-        if (depth == 1)
-        {
-            float v1Numer;
-            float v1Denom;
+        if (depth == 1) {
 
-            if (lightPath->lightInd[firstIdx] != -1) // if its not environment light
-            {
-                v1Numer = 1.0f; // effectively (P_pos / P_pos)
-        
-                float pdf_emission_solidAngle = dot(start_wi, lightPath->n[firstIdx]) / PI; 
+            /*the spatial probability of picking the starting light. This is equal to both
+            the probability of connecting to the light vertex via nee, and also equal to the
+            probability of starting a light path at the light vertex. This value is stored
+            in the forward pdf of the light vertex
+            */
+            float pdf_sampleLight = lightPath->pdfFwd[firstIdx];
 
-                float G = fabsf(currentToPrev_local.z) / distanceSQR;
+            // the pdf of connecting to the previous light via NEE
+            float pdf_connect = pdf_sampleLight;
 
-                v1Denom = pdf_emission_solidAngle * G;
-            }
-            else
-            {
-                //float pdf_rev_solidAngle = 1.0f / (4.0f * PI); 
-                //float pdf_fwd_solidAngle = lightPath->pdfFwd[firstIdx] * 1.0f / (4.0f * PI);
+            // the pdf of starting a light path at the previous light
+            float pdf_trace = pdf_sampleLight;
 
-                // directional pdfs cancel out. this simplifies to the area of the virtual disc, but were doing this ratio still for clarity
-                v1Numer = 1.0f;
-                v1Denom = lightPath->pdfFwd[firstIdx];
-            }
+            // to convert to area density at previous vertex
+            float G = prev_cosine / distanceSQR;
 
-            lightPath->misWeight[currIdx] = (v1Numer / v1Denom) * (v1Numer / v1Denom);
+            // pdfFwdArea is the emission pdf of the light, converted to area density at the current vertex
+            float vcm = (pdf_connect) / (pdf_trace * pdfFwd_area);
+            float vc = G / (pdf_trace * pdfFwd_area);
+
+            lightPath->d_vcm[currIdx] = vcm;
+            lightPath->d_vc[currIdx] = vc;
+
+            prev_d_vcm = vcm;
+            prev_d_vc = vc;
+            pdf_onebeforePrevRev_SA = pdfRev_solidAngle;
         }
-
-        float nextWeight;
-        float currWeight = lightPath->misWeight[currIdx];
-
-        if (lightPath->isDelta[currIdx])
+        else if (prevWasDelta) 
         {
-            nextWeight = currWeight;
+            float G = prev_cosine / distanceSQR; // distance to previous vertex
+            float vcm = 0.0f;
+            float vc = (G / pdfFwd_area) * (pdf_onebeforePrevRev_SA * prev_d_vc);
+
+            lightPath->d_vcm[currIdx] = vcm;
+            lightPath->d_vc[currIdx] = vc;
+
+            prev_d_vcm = vcm;
+            prev_d_vc = vc;
+            pdf_onebeforePrevRev_SA = pdfRev_solidAngle;
         }
         else
         {
-            float ratio = (depth == 1) ? (pdfRev_area/pdfFwd_area) : (numer/denom);
+            // to convert to area density at previous vertex
+            float G = prev_cosine / distanceSQR;
 
-            nextWeight = ratio * ratio * (1.0f + currWeight);
-        }
+            float vcm = 1.0f / pdfFwd_area;
+            float vc = (G / pdfFwd_area) * (prev_d_vcm + pdf_onebeforePrevRev_SA * prev_d_vc);
 
-        if (depth + 1 < maxDepth) {
-            int nextIdx = pathBufferIdx(w, h, x, y, depth + 1);
-            lightPath->misWeight[nextIdx] = nextWeight;
+            lightPath->d_vcm[currIdx] = vcm;
+            lightPath->d_vc[currIdx] = vc;
+
+            prev_d_vcm = vcm;
+            prev_d_vc = vc;
+            pdf_onebeforePrevRev_SA = pdfRev_solidAngle;
         }
 
 
@@ -1690,6 +1659,9 @@ __device__ void generateLightPath(curandState& localState, Material* materials, 
         r.direction = wi_world;
 
         pathLength++;
+        prevPDF_solidAngle = pdfFwd_solidAngle; // update the prev pdf
+        prev_cosine = fabsf(wi_local.z); // update the prev cosine
+        prevWasDelta = currDelta;
     }
 }
 
@@ -1789,63 +1761,46 @@ __global__ void lightPathTracing (curandState* rngStates, Camera camera, PathVer
             //---------------------------------------------------------------------------------------------------------------------------------------------------
             // MIS Weight Calculation
             //---------------------------------------------------------------------------------------------------------------------------------------------------
+            float misWeight;
             
-            /*
-            lightPath->misWeight[lightPathIDX] contains a value in the form ratio^2 (1 + prevMIS), where ratio is the last complete ratio that
-            can be known at path generation time. Therefore, since the reverse pdf of the current index requires an incident direction, it is not
-            included in this value (the one stored in the path vertex buffer at this index assumes that the incident direction is the next light
-            vertex, which does not exist in the path we are currently weighing the contribution of).
-            
-            The unknowns needed to complete the mis weight is currently:
-
-            1. The reverse pdf of generating the current strategy (camera emission pdf - what if the camera extended to generate the current vertex)
-            2. The forward pdf of generating the current strategy (this is stored as the forward pdf of the current vertex)
-
-            3. The reverse pdf of generating the previous light vertex, with the now known incident direction. This is the bsdf scattering pdf evaluated
-                at the current vertex with incident direction from the camera, and outgoing direction towards the previous light vertex.
-            */
-
-            // the reverse pdf of finding the camera vertex by bsdf sampling. This is zero for a pinhole camera.
-            float pdf_scatterToCameraFwdRev_area = 0.0f;
-            float pdf_connectToCamera_area = 1.0f; // this is the current strategy
-
-            // ratio comparing the light path scattering to the camera vs our current strategy
-            float scatterToCameraRatio = pdf_scatterToCameraFwdRev_area / pdf_connectToCamera_area;
-            
-            float pdf_Emit_area = cosAtLight / (distanceSQR * sensorArea * cosAtCamera * cosAtCamera * cosAtCamera);
-
-            float pdf_scatterToCurrFwd_area = lightPath->pdfFwd[lightPathIDX];
-
-            // ratio comparing the camera path extending by sending a ray to the curr point vs our current strategy
-            float camEmitRatio = pdf_Emit_area / (pdf_scatterToCurrFwd_area * pdf_connectToCamera_area);
-
-            float recursiveRatio;
-            if (s > 1)
+            if (s == 1)
             {
-                
+                float pdf_sample_y0 = lightPath->pdfFwd[lightPathIDX];
+                float pdf_traceFromCamera = cosAtLight / (distanceSQR * sensorArea * cosAtCamera * cosAtCamera * cosAtCamera);
 
-                float pdf_scatterToPrevRev_SA;
-                pdf_eval(materials, lightPath->materialID[lightPathIDX], textures, -lightToCamera_local, currToPrev_local, etaI, etaT, 
-                    pdf_scatterToPrevRev_SA, lightPath->uv[lightPathIDX]);
-
-                float pdf_scatterToPrevRev_area = pdf_scatterToPrevRev_SA * fabsf(dot(normalize(-currToPrev_world), lightPath->n[prevIdx])) 
-                    / lengthSquared(lightPath->pt[lightPathIDX]-lightPath->pt[prevIdx]);
-                
-                recursiveRatio = pdf_scatterToPrevRev_area / pdf_scatterToCurrFwd_area;
-                if (lightPath->isDelta[prevIdx])
-                {
-                    recursiveRatio = 0.0f; // this is because its trying to connect to a delta surface. question this
-                }
+                float wLight = pdf_traceFromCamera / pdf_sample_y0;
+    
+                misWeight = 1.0f / (1.0f + wLight);
             }
             else
-                recursiveRatio = 0.0f;
+            {
+                // we dont consider randomwalks onto the eye lens
+                float wEye = 0.0f;
 
-            float misWeight = 1.0f / (
-                1.0f + 
-                scatterToCameraRatio * scatterToCameraRatio + 
-                camEmitRatio * camEmitRatio +
-                recursiveRatio * recursiveRatio * (1.0f + lightPath->misWeight[lightPathIDX])
-            );
+                // the chance to begin a eye path at the eye vertex
+                float pdf_trace = 1.0f;
+
+                // the chance to connect a light vertex to the eye vertex
+                float pdf_connect = 1.0f;
+
+                float traceRatio = pdf_trace / pdf_connect;
+
+                // the camera emission pdf of generating the current vertex
+                float pdf_currRev_area = cosAtLight / (distanceSQR * sensorArea * cosAtCamera * cosAtCamera * cosAtCamera);
+
+                //float numLightSample = (float) w * (float) h;
+                float numLightSample = 1.0f;
+
+                float pdf_oneBeforePrevRev_SA;
+                pdf_eval(materials, lightPath->materialID[lightPathIDX], textures, -lightToCamera_local, currToPrev_local, etaI, etaT, 
+                        pdf_oneBeforePrevRev_SA, lightPath->uv[lightPathIDX]);
+                
+                float wLight = traceRatio * (pdf_currRev_area / numLightSample) * 
+                    (lightPath->d_vcm[lightPathIDX] + pdf_oneBeforePrevRev_SA * lightPath->d_vc[lightPathIDX]);
+
+                misWeight = 1.0f / (1.0f + wLight + wEye);
+            }
+
 
             float4 weightedContribution = contribution * misWeight;
             
@@ -1875,7 +1830,7 @@ __global__ void lightPathTracing (curandState* rngStates, Camera camera, PathVer
  Therefore, we must always complete the partial mis weight by applying a recursive ratio corresponding
  to the reverse/fwd pdf of vi, in addition to any other terms representing other strategies.
  */
-__device__ bool connectPath(curandState& localState, int t, int s, int x, int y, int w, int h, int maxEyeDepth, int maxLightDepth, Material* materials,BVHnode* BVH, int* BVHindices, Vertices* vertices, 
+__device__ bool connectPath(curandState& localState, int t, int s, int x, int y, int w, int h, Camera camera, int maxEyeDepth, int maxLightDepth, Material* materials,BVHnode* BVH, int* BVHindices, Vertices* vertices, 
     Triangle* scene, Triangle* lights, int lightNum, float4* textures, float sceneRadius, int eyePathLength, int lightPathLength, PathVertices* eyePath, PathVertices* lightPath, float4& contribution, float& misWeight)
 {
     int eyePathIDX = pathBufferIdx(w, h, x, y, t - 1);
@@ -1902,7 +1857,7 @@ __device__ bool connectPath(curandState& localState, int t, int s, int x, int y,
     float etaT = 1.0f;
 
     //---------------------------------------------------------------------------------------------------------------------------------------------------
-    // s = k > 1, t = 1: Connect light directly to camera. This is handled in the lightpathtracing kernel
+    // s = k > 1, t = 1: Connect light directly to camera. This is handled in the lightpathtracing kernel in the first pass
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     
     //---------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1911,23 +1866,23 @@ __device__ bool connectPath(curandState& localState, int t, int s, int x, int y,
     
     if (s == 1 && t > 1 && BDPT_NEE)
     {
-        float eye_misWeight = eyePath->misWeight[eyePathIDX];
+        //float eye_misWeight = eyePath->misWeight[eyePathIDX];
         float4 nee_contribution_unweighted; // assigned in nee
-        float pdf_nee; // assigned in nee. in area measure for area light, and in SA for environment
+        float pdf_connect; // assigned in nee. in area measure for area light, and in SA for environment
         float4 eyeToLight; // assigned in nee
         int lightInd; // assigned in nee
         float cosLight; // assigned in nee
         float pdf_emit_SA; // the probability that the light was sampled to emit, decoupled from the nee probability
 
-        float4 toShadingPos_local;
+        float4 prevToCurr_local;
         float4 prevTocurr = -eyePath->wo[eyePathIDX];
         float4 prevTocurrUnit = normalize(prevTocurr);
         // shading function expects toShadingPos_local to face towards the surface, wo faces away
-        toLocal(-eyePath->wo[eyePathIDX], eyePath->n[eyePathIDX], toShadingPos_local);
+        toLocal(prevTocurr, eyePath->n[eyePathIDX], prevToCurr_local);
 
         // sets eyeToLight, lightPDF_area, lightInd, cosLight, neecontributionunweighted
         bool occluded = BDPTnextEventEstimation(localState, materials, textures, BVH, BVHindices, vertices, scene, lights, lightNum, eyePath->materialID[eyePathIDX], 
-            eyePath->pt[eyePathIDX], toShadingPos_local, eyePath->n[eyePathIDX], eyePath->uv[eyePathIDX], pdf_nee, nee_contribution_unweighted, eyeToLight, 
+            eyePath->pt[eyePathIDX], prevToCurr_local, eyePath->n[eyePathIDX], eyePath->uv[eyePathIDX], pdf_connect, nee_contribution_unweighted, eyeToLight, 
             lightInd, cosLight, pdf_emit_SA, etaI, etaT, sceneRadius);
         if (occluded)
         {
@@ -1939,79 +1894,42 @@ __device__ bool connectPath(curandState& localState, int t, int s, int x, int y,
         if (lightInd != -1)
         {
             float distanceSQR = fmaxf(lengthSquared(eyeToLight), RAY_EPSILON);
+
+            float wLight;
+            float wEye;
+
             float pdf_eyeToLight_solidAngle;
             
-            pdf_eval(materials, eyePath->materialID[eyePathIDX], textures, toShadingPos_local, eyeToLight_local, etaI, etaT, pdf_eyeToLight_solidAngle, eyePath->uv[eyePathIDX]);
+            pdf_eval(materials, eyePath->materialID[eyePathIDX], textures, prevToCurr_local, eyeToLight_local, etaI, etaT, pdf_eyeToLight_solidAngle, eyePath->uv[eyePathIDX]);
             float pdf_bsdf_area = pdf_eyeToLight_solidAngle * fabsf(cosLight) / distanceSQR;
 
-            // compares scattering to the light versus the current strategy
-            float bsdfRatio = pdf_bsdf_area / pdf_nee; // pdf_nee is in area
-            
-            float pdf_scatterToPrev_SA;
-            pdf_eval(materials, eyePath->materialID[eyePathIDX], textures, -eyeToLight_local, -toShadingPos_local, etaI, etaT, pdf_scatterToPrev_SA, eyePath->uv[eyePathIDX]);
+            float bsdfRatio = pdf_bsdf_area / pdf_connect;
+            wLight = bsdfRatio;
 
-            float pdf_chooseLightStart = pdf_nee; // pdf_nee happens to be equal to the spatial pdf of starting a light path at the light
-            float pdf_emit_area = pdf_emit_SA * fabsf(eyeToLight_local.z) / distanceSQR; // pdf_emit_SA is calculated with cosLight is the cosine of the light->surface ray (cos weighted pdf) wrt light normal, divided by PI
-            float pdf_intializeLightPath_area = pdf_emit_area * pdf_chooseLightStart;
+            // the probability to start a ligth path at the light, in this implementation its equal to nee probability
+            float pdf_trace = pdf_connect;
 
-            float pdf_fwd_area = eyePath->pdfFwd[eyePathIDX]; // probability of scattering to the current vertex with the bsdf evaluated at the previous vertex
+            float traceRatio = pdf_trace / pdf_connect;
 
-            // compares the light emitting to the current vertex vs 
-            float lightTraceRatio = pdf_intializeLightPath_area / (pdf_fwd_area * pdf_nee);
+            // the probability of a light path emitting to the current vertex, converted to area density at the current vertex
+            float pdf_currRev_area = pdf_emit_SA * fabsf(eyeToLight_local.z) / distanceSQR;
 
-            float pdf_scatterToPrev_area = pdf_scatterToPrev_SA * fabsf(dot(eyePath->n[eyePathPREVIDX], prevTocurrUnit)) / lengthSquared(eyePath->pt[eyePathPREVIDX]-eyePath->pt[eyePathIDX]);
+            float pdf_oneBeforePrevRev_SA;
+            pdf_eval(materials, eyePath->materialID[eyePathIDX], textures, -eyeToLight_local, -prevToCurr_local, etaI, etaT, pdf_oneBeforePrevRev_SA, eyePath->uv[eyePathIDX]);
 
-            /* full probability of the light emitting in a direction and hitting the current surface and scattering to the previous vertex. 
-            This completes the reverse/forward ratio at this vertex that we couldnt calculate earlier*/ 
-            float currRevPDF_area = pdf_scatterToPrev_area;
-            
-            // completes the recursive ratio describing the path history by bridging the current vertex's rev/fwd ratio with the path history
-            float recurseRatio = currRevPDF_area / pdf_fwd_area; // this is the complete reverse/forward ratio at the current point
+            wEye = traceRatio * pdf_currRev_area * (eyePath->d_vcm[eyePathIDX] + pdf_oneBeforePrevRev_SA * eyePath->d_vc[eyePathIDX]);
 
-            if (eyePath->isDelta[eyePathPREVIDX])
-            {
-                // Previous bounce was specular (Dirac delta). 
-                // The forward PDF is infinite, driving the ratio to zero.
-                recurseRatio = 0.0f;
-            }
+            misWeight = 1.0f / (1.0f + wLight + wEye);
 
-            /*eye_misWeight cannot and does not know the reverse/forward ratio at the current vertex, 
-            because that needs information that cannot be known at path generation time. Therefore, 
-            we complete that ratio here in the connection function. recurse is the ratio needed to
-            complete the chain going backwards along the eye path as if it were a light path. Nee is
-            special because there are so many different ways of generating this sample since we are
-            one away from the end point*/
-            misWeight = 1.0f / (
-                1.0f + 
-                bsdfRatio * bsdfRatio + 
-                lightTraceRatio * lightTraceRatio +
-                recurseRatio * recurseRatio * (1.0f + eye_misWeight)
-            );
-
-            // calculated like so in nee: contribution = throughputScale * f_val * l.emission * G / light_pdf_area; // unweighted
             contribution = nee_contribution_unweighted * eyePath->beta[eyePathIDX];
+            //printf("wLight: %f, wEye %f\n", wLight, eyePath->d_vc[eyePathIDX]);
         }
         else // uh im not doing this rn
         {
-            float cosineThetaSurface = eyeToLight_local.z;
-            float pdf_eyeToLight_solidAngle;
-            
-            pdf_eval(materials, eyePath->materialID[eyePathIDX], textures, toShadingPos_local, eyeToLight_local, etaI, etaT, pdf_eyeToLight_solidAngle, eyePath->uv[eyePathIDX]);
-
-            float bsdfratio = pdf_eyeToLight_solidAngle / pdf_nee; // pdf_nee is in solid angle measure
-
-            float pdf_prev_bsdf_area = eyePath->pdfFwd[eyePathIDX];
-
-            float prob_light_hitting_surface = pdf_emit_SA * cosineThetaSurface / (PI * sceneRadius * sceneRadius);
-
-            float prob_nee_generating_path = pdf_prev_bsdf_area * pdf_nee;
-
-            float emitratio = prob_light_hitting_surface / prob_nee_generating_path;
-            misWeight = 1.0f / (1.0f + bsdfratio * bsdfratio + emitratio * emitratio * (1.0f + eye_misWeight));
-
-            // calculated like so in nee: contribution = throughputScale * f_val * Le * cosThetaSurface / pdf_chooseLightPoint_solidAngle;
-            contribution = nee_contribution_unweighted * eyePath->beta[eyePathIDX];
+            // environment lights currently unimplemented
         }
+
+        
         return true;
     }
 
@@ -2026,109 +1944,95 @@ __device__ bool connectPath(curandState& localState, int t, int s, int x, int y,
             return true;
         if (t == eyePathLength && (eyePath->lightInd[eyePathIDX] == -1)) // path terminated on the sky. We need to add the sky contribution (stored in beta)
         {
-            //printf("Sky hit encountered at %d, %d, t=%d\n", x, y, t);
-            misWeight = eyePath->misWeight[eyePathIDX]; // we have calculated this in the eyepath generation
-            //unweighted contribution
-            contribution = eyePath->beta[eyePathIDX]; // we stored the contribution inside beta
-
-            if (eyePath->isDelta[eyePathPREVIDX])
-            {
-                float lum = luminance(contribution);
-                if (lum > MAX_FIREFLY_LUM)
-                {
-                    contribution *= (MAX_FIREFLY_LUM / lum);
-                }
-            }
+            // environment lights currently unimplemented
             return false;
         }
         else if (eyePath->lightInd[eyePathIDX] != -51 && !eyePath->backface[eyePathIDX]) // ie. we are on a light, and we are on the right side of it
         {
-            /*
-            This is actually very similar to the nee case. We are not pivoting around the current index, instead
-            we are pivoting around the PREVIOUS vertex. In this case the mis value stored at the current index
-            actually does have everything we need to pivot around the previous vertex, since we calculated the
-            values lagged behind.
-            */
-            float eye_misWeight = eyePath->misWeight[eyePathIDX];
-
-            float4 Le = lights[eyePath->lightInd[eyePathIDX]].emission;
             float4 lightToPrev_unit = normalize(eyePath->wo[eyePathIDX]);
-            float cosThetaLight = fabsf(dot(eyePath->n[eyePathIDX], lightToPrev_unit));
+            float4 lightNorm = eyePath->n[eyePathIDX];
+            float cosThetaLight = fabsf(dot(lightNorm, lightToPrev_unit));
             float distanceSQR = lengthSquared(eyePath->pt[eyePathIDX] - eyePath->pt[eyePathPREVIDX]);
+            if (t == 1)
+            {
+                float cosAtCamera = fabsf(dot(eyePath->n[eyePathPREVIDX], -lightToPrev_unit));
 
-            // if t=2, the previous vertex is delta because its a pinhole camera, BUT this check is meant for checking nee validity, 
-            // but at t=2 we are not balancing against nee, we are balancing against direct light tracing. 
-            // it just so happens that the math works out the same for the reverse pdf, so we can reuse the same code.
-            if (eyePath->isDelta[eyePathPREVIDX] && t > 2) 
-            {
-                misWeight = 1.0f / (1.0f + eye_misWeight);
-            }
-            else
-            {
+                float aspect = (float)w / (float)h;
+                float halfH = camera.fovScale;
+                float halfW = halfH * aspect;
+                float sensorArea = (2.0f * halfW) * (2.0f * halfH);
+
+                float4 light_f = f4(1.0f/PI);
+                
+                float pdf_traceFromCamera = cosThetaLight / (distanceSQR * sensorArea * cosAtCamera * cosAtCamera * cosAtCamera);
+
                 float pdf_chooseLight = 1.0f / (SAMPLE_ENVIRONMENT ? (lightNum + 1.0f) : lightNum);
 
-                float4 apos = vertices->positions[lights[eyePath->lightInd[eyePathIDX]].aInd];
-                float4 bpos = vertices->positions[lights[eyePath->lightInd[eyePathIDX]].bInd];
-                float4 cpos = vertices->positions[lights[eyePath->lightInd[eyePathIDX]].cInd];
+                Triangle light = lights[eyePath->lightInd[eyePathIDX]];
+                float4 apos = vertices->positions[light.aInd];
+                float4 bpos = vertices->positions[light.bInd];
+                float4 cpos = vertices->positions[light.cInd];
 
                 float area = 0.5f * length(cross3(bpos - apos, cpos - apos));
 
-                float pdf_nee = pdf_chooseLight / area;
+                float pdf_connect = pdf_chooseLight / area;
 
-                /*
-                the forward pdf of the current vertex is normally invalid/extraneous information for when the pivot is the previous
-                vertex, but since the forward pdf of the current vertex is exactly the bsdf scattering pdf of scattering from the pivot
-                to the light (current) vertex, we don't need to actually calculate anything new.
-
-                This has also, by convention, been converted to area density at the current vertex. This allows us to directly calculate
-                the emit/bsdf ratio and nee/bsdf ratio.
-                */
-                float pdf_prev_to_current_area = eyePath->pdfFwd[eyePathIDX];
-                float pdf_generatePivotFwd_area = eyePath->pdfFwd[eyePathPREVIDX];
-
-                float neeRatio = pdf_nee / pdf_prev_to_current_area;
-
-                float pdf_emit_SA = (pdf_chooseLight / area) * (cosThetaLight / PI); // spatial pdf of choosing the point times directional pdf
-                float pdf_emit_area = pdf_emit_SA * fabsf(dot(eyePath->n[eyePathPREVIDX], -lightToPrev_unit)) / distanceSQR;
-
-                // denom is the total probability
-                float emitRatio = pdf_emit_area / (pdf_generatePivotFwd_area * pdf_prev_to_current_area);
-
-                /*
-                Normally, we would calculate a reverse forward ratio and multiply that by eye_misWeight, because we couldn't calcualte
-                that at path generation time. However since we are pivoting around the previous vertex, the mis value stored at this
-                vertex perfectly includes the most recent ratio that we need (the reverse/forward ratio of the pivot vertex).
-
-                Basically, eye_misWeight is actually equal to:
-                
-                recurseRatio * recurseRatio (1.0 + eyePath->misWeight[eyePathPREVIDX])
-                
-                where recurseRatio is equal to the ratio of the reverse and forward scattering pdfs at the previous vertex (the pivot vertex)
-                */
-                misWeight = 1.0f / (
-                    1.0f + 
-                    neeRatio * neeRatio + 
-                    emitRatio * emitRatio +
-                    eye_misWeight
-                );
+                float wEye = pdf_connect / pdf_traceFromCamera;
+    
+                misWeight = 1.0f / (1.0f + wEye);
             }
-            contribution = Le * eyePath->beta[eyePathIDX];
-
-            
-            if (eyePath->isDelta[eyePathPREVIDX])
+            else
             {
-                float lum = luminance(contribution);
-                if (lum > MAX_FIREFLY_LUM)
+                float4 Le = lights[eyePath->lightInd[eyePathIDX]].emission;
+
+                float wEye;
+                float wLight = 0.0f;
+                float pdf_connect;
+
+                if (eyePath->isDelta[eyePathPREVIDX])
                 {
-                    contribution *= (MAX_FIREFLY_LUM / lum);
+                    pdf_connect = 0.0f;
+                }
+                else
+                {
+                    float pdf_chooseLight = 1.0f / (SAMPLE_ENVIRONMENT ? (lightNum + 1.0f) : lightNum);
+
+                    Triangle light = lights[eyePath->lightInd[eyePathIDX]];
+                    float4 apos = vertices->positions[light.aInd];
+                    float4 bpos = vertices->positions[light.bInd];
+                    float4 cpos = vertices->positions[light.cInd];
+
+                    float area = 0.5f * length(cross3(bpos - apos, cpos - apos));
+
+                    pdf_connect = pdf_chooseLight / area;
+                }
+
+                // these happen to be equal, since pdf_trace is the spatial prob of starting light path at the current vertex
+                float pdf_trace = pdf_connect;
+                
+                // purely the emission pdf of generating the previous vertex
+                float pdf_oneBeforePrevRev_SA = cosThetaLight / PI; 
+
+                wEye = pdf_connect * eyePath->d_vcm[eyePathIDX] + pdf_trace * pdf_oneBeforePrevRev_SA * eyePath->d_vc[eyePathIDX];
+
+                misWeight = 1.0f / (1.0f + wEye + wLight);
+
+                contribution = Le * eyePath->beta[eyePathIDX];
+                
+                if (eyePath->isDelta[eyePathPREVIDX])
+                {
+                    float lum = luminance(contribution);
+                    if (lum > MAX_FIREFLY_LUM)
+                    {
+                        contribution *= (MAX_FIREFLY_LUM / lum);
+                    }
                 }
             }
+            
         }
         return true;
     }
-    //---------------------------------------------------------------------------------------------------------------------------------------------------
-    // General Case
-    //---------------------------------------------------------------------------------------------------------------------------------------------------
+
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     // General Case: s > 1, t > 1
     // Connect a vertex from the Eye Path (eyePathIDX) to a vertex from the Light Path (lightPathIDX)
@@ -2136,122 +2040,111 @@ __device__ bool connectPath(curandState& localState, int t, int s, int x, int y,
     
     if ( s > 1 && t > 1 && BDPT_CONNECTION)
     {
-        // 1. Setup Connection Vectors
-        // Direction from Eye Vertex -> Light Vertex
-        float4 diff = lightPath->pt[lightPathIDX] - eyePath->pt[eyePathIDX]; 
-        float distSq = fmaxf(lengthSquared(diff), RAY_EPSILON);
-        float dist = length(diff);
-        float4 dir = diff / dist; // Normalized direction: Eye -> Light
+        float4 lightPos = lightPath->pt[lightPathIDX];
+        float4 eyePos = eyePath->pt[eyePathIDX];
+        float4 lightNorm = lightPath->n[lightPathIDX];
+        float4 eyeNorm = eyePath->n[eyePathIDX];
 
-        if (distSq < RAY_EPSILON)
+        float4 eyeToLight = lightPos - eyePos; 
+        float distanceSQR = fmaxf(lengthSquared(eyeToLight), RAY_EPSILON);
+        float distance = length(eyeToLight);
+        float4 eyetoLight_unit = eyeToLight / distance; // Normalized direction: Eye -> Light
+        float4 lightToEye_unit = -eyetoLight_unit; // Normalized direction: Eye -> Light
+
+        if (distanceSQR < RAY_EPSILON)
             return true;
 
-        // 2. Geometric Validity Checks
-        // Check orientation at the Light Vertex (We need light to leave the surface towards the Eye)
-        // dir points Eye->Light, so -dir points Light->Eye.
-        float cosLight = dot(lightPath->n[lightPathIDX], -dir);
-        
-        // Check orientation at the Eye Vertex (We need light to arrive from the Light)
-        // dir points Eye->Light.
-        float cosEye = dot(eyePath->n[eyePathIDX], dir);
-
-        // Validate Light Vertex
-        bool lightValid = false;
-
-        lightValid = (cosLight > EPSILON);
-
-        // Validate Eye Vertex
-        bool eyeValid = false;
-        eyeValid = (cosEye > EPSILON);
+        float cosLight = fabsf(dot(lightNorm, -eyetoLight_unit));
+        float cosEye = fabsf(dot(eyeNorm, eyetoLight_unit));
 
         // If geometry allows connection
-        if (lightValid && eyeValid) 
+        if ((cosLight > EPSILON) && (cosEye > EPSILON)) 
         {
             // currently connections cannot happen through transmissive materials
-            Ray r = Ray(eyePath->pt[eyePathIDX] + eyePath->n[eyePathIDX] * RAY_EPSILON, dir);
-            
+            Ray r = Ray(eyePos + eyeNorm * RAY_EPSILON, eyetoLight_unit);
 
             float4 throughputScale;
-            BVHShadowRay(r, BVH, BVHindices, vertices, scene, materials, throughputScale, dist - RAY_EPSILON, -1);
+            BVHShadowRay(r, BVH, BVHindices, vertices, scene, materials, throughputScale, distance - RAY_EPSILON, -1);
 
             if (lengthSquared(throughputScale) > EPSILON)
             {
-                // 4. Evaluate BSDFs and PDFs
-                // We need to transform world-space vectors to local tangent space for eval functions.
-                
-                // --- Evaluation at Eye Vertex ---
-                // We evaluate flow: Light -> Eye -> PreviousEyeVertex
-                // 'fixed' direction: Camera -> Surface ( -eyePath->wo )
-                // 'sampled' direction: Surface -> Light ( dir )
-                float4 eye_incoming_local; // Camera -> Surface
-                toLocal(-eyePath->wo[eyePathIDX], eyePath->n[eyePathIDX], eye_incoming_local);
-                
-                float4 eye_outgoing_local; // Surface -> Light
-                toLocal(dir, eyePath->n[eyePathIDX], eye_outgoing_local);
+                //-------------------------------------------------------
+                // Calculate reverse pdf at curr eye index (area)
+                //-------------------------------------------------------
+                float4 lightToEye_localAtLight;
+                toLocal(lightToEye_unit, lightNorm, lightToEye_localAtLight);
 
+                float4 toLightFromPrev_localAtLight;
+                toLocal(-lightPath->wo[lightPathIDX], lightNorm, toLightFromPrev_localAtLight);
+
+                // bsdf evaluated at the light vertex, of scattering towards the eye vertex
+                float pdf_eyeRev_SA;
+                pdf_eval(materials, lightPath->materialID[lightPathIDX], textures, toLightFromPrev_localAtLight, 
+                    lightToEye_localAtLight, etaI, etaT, pdf_eyeRev_SA, lightPath->uv[lightPathIDX]);
+                
+                // convert to area density around the eye vertex
+                float pdf_eyeRev_area = pdf_eyeRev_SA * cosEye / distanceSQR;
+
+                //-------------------------------------------------------
+                // Calculate reverse pdf at prev eye index (SA)
+                //-------------------------------------------------------
+
+                float4 lightToEye_localAtEye;
+                toLocal(lightToEye_unit, eyeNorm, lightToEye_localAtEye);
+
+                float4 toPrevFromEye_localAtEye;
+                toLocal(eyePath->wo[eyePathIDX], eyeNorm, toPrevFromEye_localAtEye);
+                
+                // pdf of generating the vertex before the eye vertex
+                float pdf_oneBeforeEyeRev_SA;
+                pdf_eval(materials, eyePath->materialID[eyePathIDX], textures, lightToEye_localAtEye, 
+                    toPrevFromEye_localAtEye, etaI, etaT, pdf_oneBeforeEyeRev_SA, eyePath->uv[eyePathIDX]);
+                
+                //-------------------------------------------------------
+                // Calculate reverse pdf at curr light index (area)
+                //-------------------------------------------------------
+                
+                float4 toEyeFromPrev_localAtEye = -toPrevFromEye_localAtEye;
+                float4 eyeToLight_localAtEye = -lightToEye_localAtEye;
+
+                float pdf_lightRev_SA;
+                pdf_eval(materials, eyePath->materialID[eyePathIDX], textures, toEyeFromPrev_localAtEye, 
+                    eyeToLight_localAtEye, etaI, etaT, pdf_lightRev_SA, eyePath->uv[eyePathIDX]);
+
+                float pdf_lightRev_area = pdf_lightRev_SA * cosLight / distanceSQR;
+
+                //-------------------------------------------------------
+                // Calculate reverse pdf at prev light index (SA)
+                //-------------------------------------------------------
+
+                float4 eyeToLight_localAtLight = -lightToEye_localAtLight;
+                float4 toPrevFromLight_localAtLight = -toLightFromPrev_localAtLight;
+                
+                float pdf_oneBeforeLightRev_SA;
+                pdf_eval(materials, lightPath->materialID[lightPathIDX], textures, eyeToLight_localAtLight, 
+                    toPrevFromLight_localAtLight, etaI, etaT, pdf_oneBeforeLightRev_SA, lightPath->uv[lightPathIDX]);
+
+                float wEye = pdf_eyeRev_area * (eyePath->d_vcm[eyePathIDX] + pdf_oneBeforeEyeRev_SA * eyePath->d_vc[eyePathIDX]);
+                float wLight = pdf_lightRev_area * (lightPath->d_vcm[lightPathIDX] + pdf_oneBeforeLightRev_SA * lightPath->d_vc[lightPathIDX]);
+
+                misWeight = 1.0f / (1.0f + wEye + wLight);
+                
                 float4 f_eye;
-                float pdf_eyeToLight_solidAngle;
-                // PDF of sampling 'dir' given we are at Eye Vertex coming from Camera
-                pdf_eval(materials, eyePath->materialID[eyePathIDX], textures, eye_incoming_local, eye_outgoing_local, etaI, etaT, pdf_eyeToLight_solidAngle, eyePath->uv[eyePathIDX]);
-                // BSDF weight for this connection
-                f_eval(materials, eyePath->materialID[eyePathIDX], textures, eye_incoming_local, eye_outgoing_local, etaI, etaT, f_eye, eyePath->uv[eyePathIDX]);
-
-
-                // --- Evaluation at Light Vertex ---
-                // We evaluate flow: PreviousLightVertex -> Light -> Eye
-                // 'fixed' direction: Source -> Surface ( -lightPath->wo )
-                // 'sampled' direction: Surface -> Eye ( -dir )
-                float4 light_incoming_local; // Source -> Surface
-                toLocal(-lightPath->wo[lightPathIDX], lightPath->n[lightPathIDX], light_incoming_local);
-                
-                float4 light_outgoing_local; // Surface -> Eye
-                toLocal(-dir, lightPath->n[lightPathIDX], light_outgoing_local);
+                f_eval(materials, eyePath->materialID[eyePathIDX], textures, lightToEye_localAtEye, 
+                    toPrevFromEye_localAtEye, etaI, etaT, f_eye, eyePath->uv[eyePathIDX]);
 
                 float4 f_light;
-                float pdf_lightToEye_solidAngle;
-                // PDF of sampling '-dir' (towards Eye) given we are at Light Vertex coming from Source
-                pdf_eval(materials, lightPath->materialID[lightPathIDX], textures, light_incoming_local, light_outgoing_local, etaI, etaT, pdf_lightToEye_solidAngle, lightPath->uv[lightPathIDX]);
-                // BSDF weight for this connection
-                f_eval(materials, lightPath->materialID[lightPathIDX], textures, light_incoming_local, light_outgoing_local, etaI, etaT, f_light, lightPath->uv[lightPathIDX]);
-
-
-                // 5. Calculate Contribution and Weights
-                // Geometric term G = |cosAtEye * cosAtLight| / dist^2
-                float G = fabsf(cosEye * cosLight) / distSq;
+                f_eval(materials, lightPath->materialID[lightPathIDX], textures, eyeToLight_localAtLight, 
+                    toPrevFromLight_localAtLight, etaI, etaT, f_light, lightPath->uv[lightPathIDX]);
+                
+                float G = fabsf(cosEye * cosLight) / distanceSQR;
                 float maxG = 2.0f;
                 if (G > maxG) {
                     G = maxG; 
                 }
 
-                // Convert Solid Angle PDFs to Area PDFs
-                // PDF(Eye->Light) in Area Measure at Light Vertex = PDF_Solid * cosAtLight / dist^2
-                float pdf_eyeToLight_area = pdf_eyeToLight_solidAngle * fabsf(cosLight) / distSq;
-
-                // PDF(Light->Eye) in Area Measure at Eye Vertex = PDF_Solid * cosAtEye / dist^2
-                float pdf_lightToEye_area = pdf_lightToEye_solidAngle * fabsf(cosEye) / distSq;
-
-                // Unweighted contribution
-                // (EyePathThroughput * LightPathThroughput * f_eye * f_light * G * ShadowRayThroughput)
                 contribution = eyePath->beta[eyePathIDX] * lightPath->beta[lightPathIDX] * f_eye * f_light * G * throughputScale;
 
-                // MIS Weights
-                // Load accumulated weights from path buffers
-                float eye_misWeight = eyePath->misWeight[eyePathIDX];
-                float light_misWeight = lightPath->misWeight[lightPathIDX];
-
-                float pdf_eye_fwd = eyePath->pdfFwd[eyePathIDX];
-                float pdf_light_fwd = lightPath->pdfFwd[lightPathIDX];
-
-                //float ratioL = pdf_light_fwd / pdf_eyeToLight_area;
-                //float ratioE = pdf_eye_fwd / pdf_lightToEye_area;
-
-                float ratioL = pdf_eyeToLight_area / pdf_light_fwd;
-                float ratioE = pdf_lightToEye_area / pdf_eye_fwd;
-
-                float weightL = (1.0f + light_misWeight) * (ratioL * ratioL);
-                float weightE = (1.0f + eye_misWeight) * (ratioE * ratioE);
-
-                misWeight = 1.0f / (1.0f + weightL + weightE);
                 return true;
             }
         }
@@ -2300,7 +2193,7 @@ __global__ void Li_bidirectional(curandState* rngStates, Camera camera, PathVert
             //if (t != 2 || s != 2)
             //    continue;
 
-            if (!connectPath(localState, t, s, x, y, w, h, eyeDepth, lightDepth, materials, BVH, BVHindices, vertices, scene, lights, lightNum, 
+            if (!connectPath(localState, t, s, x, y, w, h, camera, eyeDepth, lightDepth, materials, BVH, BVHindices, vertices, scene, lights, lightNum, 
                 textures, sceneRadius, eyePathLength, lightPathLength, eyePath, lightPath, unweighted_contribution, misWeight) && BDPT_DRAWPATH)
             {
                 drawPath(overlay, eyePath, camera, x, y, w, eyePathLength, eyeDepth, f4(curand_uniform(&localState), curand_uniform(&localState), curand_uniform(&localState)));

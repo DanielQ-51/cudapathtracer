@@ -253,11 +253,11 @@ int main ()
     //int w = 1920;
     //int h = 1080;
 
-    int sampleCount = 500;
+    int sampleCount = 5000;
     int maxDepth = 40;
 
-    int eyePathDepth = 12;
-    int lightPathDepth = 12;
+    int eyePathDepth = 24;
+    int lightPathDepth = 20;
     
     int maxLeafSize = 2; // max leaf size for the BVH
 
@@ -448,10 +448,10 @@ int main ()
     //readObjSimple("scenedata/leafstem.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 14);
     //readObjSimple("scenedata/Cup.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
     //readObjSimple("scenedata/waterway3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 10);
-    //readObjSimple("scenedata/dragon.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
+    readObjSimple("scenedata/dragon.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
     //readObjSimple("scenedata/glassballaroundlight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 5);
-    //readObjSimple("scenedata/lightindragon.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), 30.0f*f4(7.0f,2.0f,2.0f), 2);
-    //readObjSimple("scenedata/lightindragon2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), 30.0f*f4(2.0f,2.0f,7.0f), 2);
+    readObjSimple("scenedata/lightindragon.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), 15.0f*f4(7.0f,2.0f,2.0f), 2);
+    readObjSimple("scenedata/lightindragon2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), 15.0f*f4(2.0f,2.0f,7.0f), 2);
     //readObjSimple("scenedata/mikushiny.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 18);
     //readObjSimple("scenedata/spoon.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.4f,0.4f), f4(), 7);
     //readObjSimple("scenedata/swordbetter.obj", points, normals, colors, mesh, lightsvec, 1.0f*f4(0.9f,0.1f,0.1f), f4(), 3);//5.0f*f4(3.0f,1.0f,1.0f)
@@ -464,7 +464,7 @@ int main ()
     //readObjSimple("scenedata/diamondlight2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 40.0f*f4(7.0f,7.0f,3.0f), 1);
     //readObjSimple("scenedata/lightforward.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 1.1f*f4(7.0f,7.0f,7.0f), 2);
     //readObjSimple("scenedata/.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 190.0f*f4(12.0f,12.0f,10.0f), 2);
-    readObjSimple("scenedata/smallwaterlight3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 50.0f*f4(7.0f,7.0f,7.0f), 2);
+    //readObjSimple("scenedata/smallwaterlight3.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 50.0f*f4(7.0f,7.0f,7.0f), 2);
     //readObjSimple("scenedata/biglight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.9f*f4(7.0f,7.0f,7.0f), 2);
     //readObjSimple("scenedata/verybiglight.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 0.1f*f4(7.0f,7.0f,7.0f), 2);
     //readObjSimple("scenedata/leaflight2.obj", points, normals, colors, uvs, mesh, lightsvec, 1.0f*f4(1.0f,1.0f,1.0f), 2.3f*f4(9.0f,9.0f,7.0f), 2);
@@ -577,6 +577,8 @@ int main ()
         cudaMalloc(&tempPaths.beta,       sizeof(float4) * totalEyePathVertices);
         cudaMalloc(&tempPaths.d_vcm,     sizeof(float) * totalEyePathVertices);
         cudaMalloc(&tempPaths.d_vc,  sizeof(float) * totalEyePathVertices);
+        cudaMalloc(&tempPaths.pdfFwd,  sizeof(float) * totalEyePathVertices);
+        cudaMalloc(&tempPaths.misWeight,  sizeof(float) * totalEyePathVertices);
         cudaMalloc(&tempPaths.isDelta,    sizeof(bool) * totalEyePathVertices);
         cudaMalloc(&tempPaths.lightInd,   sizeof(int) * totalEyePathVertices);
         cudaMalloc(&tempPaths.uv,   sizeof(float2) * totalEyePathVertices);
@@ -589,6 +591,8 @@ int main ()
         cudaMemset(tempPaths.beta,       0, sizeof(float4) * totalEyePathVertices);
         cudaMemset(tempPaths.d_vcm,     0, sizeof(float) * totalEyePathVertices);
         cudaMemset(tempPaths.d_vc,  0, sizeof(float) * totalEyePathVertices);
+        cudaMemset(tempPaths.pdfFwd,  0, sizeof(float) * totalEyePathVertices);
+        cudaMemset(tempPaths.misWeight,  0, sizeof(float) * totalEyePathVertices);
         cudaMemset(tempPaths.isDelta,    0, sizeof(bool) * totalEyePathVertices);
         cudaMemset(tempPaths.lightInd,   0, sizeof(int) * totalEyePathVertices);
         cudaMemset(tempPaths.uv,   0, sizeof(float2) * totalEyePathVertices);
@@ -608,6 +612,8 @@ int main ()
         cudaMalloc(&tempPaths1.beta,       sizeof(float4) * totalLightPathVertices);
         cudaMalloc(&tempPaths1.d_vcm,     sizeof(float) * totalLightPathVertices);
         cudaMalloc(&tempPaths1.d_vc,  sizeof(float) * totalLightPathVertices);
+        cudaMalloc(&tempPaths1.pdfFwd,  sizeof(float) * totalLightPathVertices);
+        cudaMalloc(&tempPaths1.misWeight,  sizeof(float) * totalLightPathVertices);
         cudaMalloc(&tempPaths1.isDelta,    sizeof(bool) * totalLightPathVertices);
         cudaMalloc(&tempPaths1.lightInd,   sizeof(int) * totalLightPathVertices);
         cudaMalloc(&tempPaths1.uv,   sizeof(float2) * totalLightPathVertices);
@@ -620,6 +626,8 @@ int main ()
         cudaMemset(tempPaths1.beta,       0, sizeof(float4) * totalLightPathVertices);
         cudaMemset(tempPaths1.d_vcm,     0, sizeof(float) * totalLightPathVertices);
         cudaMemset(tempPaths1.d_vc,  0, sizeof(float) * totalLightPathVertices);
+        cudaMemset(tempPaths1.pdfFwd,  0, sizeof(float) * totalLightPathVertices);
+        cudaMemset(tempPaths1.misWeight,  0, sizeof(float) * totalLightPathVertices);
         cudaMemset(tempPaths1.isDelta,    0, sizeof(bool) * totalLightPathVertices);
         cudaMemset(tempPaths1.lightInd,   0, sizeof(int) * totalLightPathVertices);
         cudaMemset(tempPaths1.uv,   0, sizeof(float2) * totalLightPathVertices);
@@ -642,6 +650,8 @@ int main ()
         cudaFree(tempPaths.uv);
         cudaFree(tempPaths.d_vcm);
         cudaFree(tempPaths.backface);
+        cudaFree(tempPaths.misWeight);
+        cudaFree(tempPaths.pdfFwd);
 
         cudaFree(tempPaths1.materialID);
         cudaFree(tempPaths1.pt);
@@ -654,6 +664,8 @@ int main ()
         cudaFree(tempPaths1.uv);
         cudaFree(tempPaths1.d_vcm);
         cudaFree(tempPaths1.backface);
+        cudaFree(tempPaths1.misWeight);
+        cudaFree(tempPaths1.pdfFwd);
     }
     else if (integratorChoice == NAIVE_UNIDIRECTIONAL)
     {
