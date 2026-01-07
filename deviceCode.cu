@@ -942,7 +942,7 @@ __device__ bool BDPTnextEventEstimation(curandState& localState, Material* mater
     float etaI, float etaT, float sceneRadius)
 {
     int totalLightNum = SAMPLE_ENVIRONMENT ? (lightNum + 1) : lightNum; // +1 for the sky
-    lightInd = SAMPLE_ENVIRONMENT ? (min(static_cast<int>(curand_uniform(&localState) * (lightNum + 1)), lightNum) - 1) : 
+    lightInd = SAMPLE_ENVIRONMENT ? (min(static_cast<int>(curand_uniform(&localState) * (totalLightNum)), totalLightNum - 1) - 1) : 
         (min(static_cast<int>(curand_uniform(&localState) * (lightNum)), lightNum - 1)); 
     
     float pdf_chooseLight = 1.0f / ((float) (SAMPLE_ENVIRONMENT ? (lightNum + 1) : lightNum));
@@ -1478,7 +1478,7 @@ __device__ void generateLightPath(curandState& localState, Material* materials, 
     float prev_d_vcm = -1.0f;
     float prev_d_vc = -1.0f;
 
-    float pdf_onebeforePrevRev_SA = -1.0f;
+    float pdf_onebeforePrevRev_SA;
     bool prevWasDelta = false;
 
     for (int depth = 1; depth < maxDepth; depth++)
@@ -1566,7 +1566,6 @@ __device__ void generateLightPath(curandState& localState, Material* materials, 
         float4 currentToPrev_local = -wo_local;
 
         float pdfRev_solidAngle;
-        float pdfRev_area;
 
         pdf_eval(materials, intersect.materialID, textures, nextToCurrent_local, currentToPrev_local, etaI, etaT, pdfRev_solidAngle, intersect.uv);
 
@@ -1799,18 +1798,19 @@ __global__ void lightPathTracing (curandState* rngStates, Camera camera, PathVer
                     (lightPath->d_vcm[lightPathIDX] + pdf_oneBeforePrevRev_SA * lightPath->d_vc[lightPathIDX]);
 
                 misWeight = 1.0f / (1.0f + wLight + wEye);
+                if (wLight < 0)
+                {
+                    //printf("wLight NEGATIVE: %f\nd_vc: %f\n", wLight, lightPath->d_vc[lightPathIDX]);
+                }
+                    
             }
 
-
-            float4 weightedContribution = contribution * misWeight;
-            
-            if (!BDPT_DOMIS)
-                weightedContribution = contribution;
+            float4 weightedContribution = contribution * misWeight / (float)(w * h);
             
             if (BDPT_PAINTWEIGHT)
                 weightedContribution = f4(misWeight);
-            else
-                weightedContribution = weightedContribution / (float)(w * h);
+            else if (!BDPT_DOMIS)
+                weightedContribution = contribution;
 
             atomicAdd(&colors[newPixelIndex].x, weightedContribution.x);
             atomicAdd(&colors[newPixelIndex].y, weightedContribution.y);
@@ -2171,15 +2171,6 @@ __global__ void Li_bidirectional(curandState* rngStates, Camera camera, PathVert
     generateEyePath(localState, camera, materials, textures, BVH, BVHindices, eyeDepth, vertices, vertNum, scene, triNum, lights, 
         lightNum, w, h, x, y, sceneRadius, eyePath, eyePathLength);
 
-    //if (curand_uniform(&localState) < (1.0f / (w * h * 2.0f)))
-    if (x == 300 && y == 300)
-    {
-        //drawPath(overlay, eyePath, camera, x, y, w, eyePathLength, eyeDepth, f4(1.0f, 0.0f, 0.0f));
-        //drawPath(overlay, lightPath, camera, x, y, w, lightPathLength, lightDepth, f4(1.0f, 1.0f, 0.0f));
-    }
-    //if (x == 458 && y == (1000-634))
-    //    debugPrintPath(w, x, y, maxDepth, *eyePath);
-
     float4 fullContribution = f4(0.0f);
 
     // using bdpt naming conventions with t and s
@@ -2190,40 +2181,20 @@ __global__ void Li_bidirectional(curandState* rngStates, Camera camera, PathVert
             float4 unweighted_contribution = f4(0.0f); // set in connect path
             float misWeight = 0.0f; // set in connect path
 
-            //if (t != 2 || s != 2)
-            //    continue;
-
             if (!connectPath(localState, t, s, x, y, w, h, camera, eyeDepth, lightDepth, materials, BVH, BVHindices, vertices, scene, lights, lightNum, 
                 textures, sceneRadius, eyePathLength, lightPathLength, eyePath, lightPath, unweighted_contribution, misWeight) && BDPT_DRAWPATH)
             {
                 drawPath(overlay, eyePath, camera, x, y, w, eyePathLength, eyeDepth, f4(curand_uniform(&localState), curand_uniform(&localState), curand_uniform(&localState)));
             }
-
-            if (s == 0 && lengthSquared(unweighted_contribution) > 0.0f && misWeight > 0.2f)
-            {
-                //printf("Unweighted: <%f, %f, %f> weight: %f Pixel: <%d, %d> \n", unweighted_contribution.x, unweighted_contribution.y, unweighted_contribution.z, misWeight, x, y);
-            }
-                
-                
+ 
             float4 weightedContribution = unweighted_contribution * misWeight;
-            //fullContribution += unweighted_contribution * misWeight;
-            //fullContribution += f4(misWeight);
-            //fullContribution += unweighted_contribution;
-            if (BDPT_DOMIS)
-                fullContribution += weightedContribution;
-            else if (BDPT_PAINTWEIGHT)
+            
+            if (BDPT_PAINTWEIGHT)
                 fullContribution += f4(misWeight);
+            else if (BDPT_DOMIS)
+                fullContribution += weightedContribution;
             else
                 fullContribution += unweighted_contribution;
-            
-            
-            
-            //fullContribution += unweighted_contribution;
-            if (misWeight > 0.0f || lengthSquared(unweighted_contribution) > 0.0f)
-            {
-                //printf("mis weight: <%f>\n Full contribution: <%f, %f, %f>\n", misWeight, unweighted_contribution.x, unweighted_contribution.y, unweighted_contribution.z);
-            }
-                
         }
     }
 
@@ -2252,10 +2223,13 @@ __global__ void cleanAndFormatImage(
 
     // 2. Check for NaNs/Infs BEFORE normalization
     if (isnan(acc.x) || isnan(acc.y) || isnan(acc.z)) {
-        finalColor = make_float4(1.0f, 0.0f, 1.0f, 1.0f); // Bright Pink Error
+        finalColor = f4(1.0f, 0.0f, 1.0f);
     } 
     else if (isinf(acc.x) || isinf(acc.y) || isinf(acc.z)) {
-        finalColor = make_float4(0.0f, 1.0f, 0.0f, 1.0f); // Bright Green Error
+        finalColor = f4(0.0f, 1.0f, 0.0f);
+    } 
+    else if (acc.x < 0 || acc.y < 0 || acc.z < 0) {
+        finalColor = f4(1.0f, 0.0f, 0.0f);
     } 
     else {
         // 3. Normalize (Average the samples)

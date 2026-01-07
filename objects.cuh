@@ -6,7 +6,9 @@
 #include <numeric>
 #include <algorithm>
 #include <curand_kernel.h>
-
+#include <sstream>
+#include <string>
+#include <fstream>
 struct BVHnode
 {
     float4 aabbMIN;
@@ -514,8 +516,8 @@ static __device__ __forceinline__ void debugPrintPath(
             "  wo:   (%.3f, %.3f, %.3f)\n"
             "  uv:   (%.3f, %.3f)\n"
             "  beta: (%.3f, %.3f, %.3f)\n"
-            "  pdfFwd: %.6f\n"
-            "  misWeight: %.6f\n"
+            "  d_vc: %.6f\n"
+            "  d_vcm: %.6f\n"
             "  isDelta: %d\n"
             "  lightInd: %d\n"
             "  backface: %d\n\n",
@@ -527,8 +529,8 @@ static __device__ __forceinline__ void debugPrintPath(
             PV.wo[idx].x, PV.wo[idx].y, PV.wo[idx].z,
             PV.uv[idx].x, PV.uv[idx].y,
             PV.beta[idx].x, PV.beta[idx].y, PV.beta[idx].z,
-            //PV.pdfFwd[idx],
-            //PV.misWeight[idx],
+            PV.d_vc[idx],
+            PV.d_vcm[idx],
             PV.isDelta[idx],
             PV.lightInd[idx],
             PV.backface[idx]
@@ -562,6 +564,16 @@ enum IntegratorChoice {
     BIDIRECTIONAL = 1,
     NAIVE_UNIDIRECTIONAL = 2,
 };
+
+__host__ inline int matchIntegrator(std::string name)
+{
+    if (name == "UNIDIRECTIONAL") return 0;
+    else if (name == "BIDIRECTIONAL") return 1;
+    else if (name == "NAIVE_UNIDIRECTIONAL") return 2;
+
+    std::cerr << "Invalid Integrator Choice!\n";
+    return -1;
+}
 
 enum MaterialType {
     MAT_DIFFUSE = 0,
@@ -761,3 +773,142 @@ struct Material
         return m;
     }
 };
+
+struct MeshConfig {
+    std::string path;
+    float emissionMultiplier;
+    float4 emissionColor;
+    int materialID;
+};
+
+struct RenderConfig {
+    // Window / System
+    int width = 0;
+    int height = 0;
+
+    std::string name;
+    
+    // Integrator Settings
+    std::string integratorType;
+    int sampleCount = 0;
+    int maxDepth = 0;
+    int bvhLeafSize = 0;
+
+    // BDPT Settings
+    int bdptEyeDepth = 0;
+    int bdptLightDepth = 0;
+    bool bdptLightTrace = false;
+    bool bdptNee = false;
+    bool bdptNaive = false;
+    bool bdptConnection = false;
+    bool bdptDrawPath = false;
+    bool bdptDoMis = false;
+    bool bdptPaintWeight = false;
+
+    // Camera
+    bool pinholeCamera = false;
+    float4 camPos;
+    float4 camRot;
+    float camFov = 0.0f;
+    float camApeture = 0.0f;
+    float camFocalDist = 0.0f;
+
+    // Assets
+    std::vector<MeshConfig> meshes;
+};
+
+__host__ inline bool loadConfig(const std::string& filepath, RenderConfig& config) {
+    std::ifstream file(filepath);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open config file: " << filepath << std::endl;
+        return false;
+    }
+
+    std::string line;
+    bool parsingMeshes = false;
+
+    while (std::getline(file, line)) {
+        line = trim(line);
+        if (line.empty()) continue;
+
+        // Detect Mesh Section
+        if (line.rfind("Meshes", 0) == 0) {
+            parsingMeshes = true;
+            continue;
+        }
+
+        if (parsingMeshes) {
+            // Mesh Line Format: path; multiplier * emission; materialID
+            // Example: scenedata/smallbox.obj; 1.0 * (0.0, 0.0, 0.0); 2
+            
+            MeshConfig mesh;
+            std::stringstream ss(line);
+            std::string segment;
+
+            // 1. Path
+            if(std::getline(ss, segment, ';')) mesh.path = trim(segment);
+
+            // 2. Emission Complex Logic
+            if(std::getline(ss, segment, ';')) {
+                std::string complexEm = trim(segment);
+                size_t starPos = complexEm.find('*');
+                size_t openParen = complexEm.find('(');
+                size_t closeParen = complexEm.find(')');
+
+                if (starPos != std::string::npos && openParen != std::string::npos) {
+                    // Parse Multiplier
+                    mesh.emissionMultiplier = std::stof(complexEm.substr(0, starPos));
+                    
+                    // Parse Vector (0.0, 0.0, 0.0) -> replace commas with space for easier parsing
+                    std::string vecStr = complexEm.substr(openParen + 1, closeParen - openParen - 1);
+                    std::replace(vecStr.begin(), vecStr.end(), ',', ' ');
+                    mesh.emissionColor = parseVec3(vecStr);
+                }
+            }
+
+            // 3. Material ID
+            if(std::getline(ss, segment, ';')) mesh.materialID = std::stoi(trim(segment));
+
+            config.meshes.push_back(mesh);
+        } 
+        else {
+            // Standard Key-Value Parsing
+            size_t delimiterPos = line.find(':');
+            if (delimiterPos == std::string::npos) continue; // Headers without values
+
+            std::string key = trim(line.substr(0, delimiterPos));
+            std::string value = trim(line.substr(delimiterPos + 1));
+
+            if (value.empty()) continue; // Skip headers like "BDPT Specific Settings:"
+
+            // Mapping
+            if (key == "width") config.width = std::stoi(value);
+            else if (key == "height") config.height = std::stoi(value);
+            else if (key == "Integrator") config.integratorType = value;
+            else if (key == "Name") config.name = value;
+            else if (key == "Sample Count") config.sampleCount = std::stoi(value);
+            else if (key == "Unidirectional Max Depth") config.maxDepth = std::stoi(value);
+            else if (key == "BVH recommended leaf size") config.bvhLeafSize = std::stoi(value);
+            else if (key == "Bidirectional Eye Depth") config.bdptEyeDepth = std::stoi(value);
+            else if (key == "Bidirectional Light Depth") config.bdptLightDepth = std::stoi(value);
+            
+            // Booleans
+            else if (key == "BDPT_LIGHTTRACE") config.bdptLightTrace = parseBool(value);
+            else if (key == "BDPT_NEE") config.bdptNee = parseBool(value);
+            else if (key == "BDPT_NAIVE") config.bdptNaive = parseBool(value);
+            else if (key == "BDPT_CONNECTION") config.bdptConnection = parseBool(value);
+            else if (key == "BDPT_DRAWPATH") config.bdptDrawPath = parseBool(value);
+            else if (key == "BDPT_DOMIS") config.bdptDoMis = parseBool(value);
+            else if (key == "BDPT_PAINTWEIGHT") config.bdptPaintWeight = parseBool(value);
+            else if (key == "Pinhole Camera") config.pinholeCamera = parseBool(value);
+
+            // Vectors & Floats
+            else if (key == "Camera Position") config.camPos = parseVec3(value);
+            else if (key == "Camera Rotation") config.camRot = parseVec3(value);
+            else if (key == "Camera FOV") config.camFov = std::stof(value);
+            else if (key == "Camera Apeture") config.camApeture = std::stof(value);
+            else if (key == "Camera FocalDist:") config.camFocalDist = std::stof(value);
+        }
+    }
+    return true;
+}

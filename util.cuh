@@ -5,13 +5,16 @@
 #include <iostream>
 #include <vector>
 #include <curand_kernel.h>
+#include <sstream>
+#include <string>
+#include <algorithm>
 using namespace std;
 
 __device__ __constant__ float EPSILON = 0.00001f;
 __device__ __constant__ float RAY_EPSILON = 0.0001f;
 __device__ __constant__ float PI = 3.141592f;
 __device__ __constant__ float SKY_RADIUS = 100.0f;
-__device__ __constant__ float MAX_FIREFLY_LUM = 20.0f;
+__device__ __constant__ float MAX_FIREFLY_LUM = 15.0f;
 
 __device__ __constant__ bool SAMPLE_ENVIRONMENT = false;
 
@@ -269,4 +272,24 @@ __device__ __forceinline__ float4 sampleSphere(curandState& localState, float R)
 __device__ inline float luminance(float4 c)
 {
     return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+}
+
+__host__ inline std::string trim(const std::string& str) {
+    size_t first = str.find_first_not_of(" \t\r\n");
+    if (std::string::npos == first) return str;
+    size_t last = str.find_last_not_of(" \t\r\n");
+    return str.substr(first, (last - first + 1));
+}
+
+__host__ inline float4 parseVec3(const std::string& val) {
+    float4 v;
+    std::stringstream ss(val);
+    ss >> v.x >> v.y >> v.z;
+    return v;
+}
+
+__host__ inline bool parseBool(const std::string& val) {
+    std::string v = val;
+    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+    return (v == "true");
 }

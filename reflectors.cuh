@@ -644,7 +644,7 @@ __device__ void pdf_eval(Material* materials, int materialID, float4* textures, 
     }
     else if (mat.type == MAT_SMOOTHDIELECTRIC)
     {
-        //smooth_dielectric_pdf(-wi, wo, etaI, etaT, reflect_dielectric, TIR, pdf);
+        pdf = 0.0f;
     }
     else if (mat.type == MAT_LEAF)
     {
