@@ -8,6 +8,7 @@
 #include <sstream>
 #include <string>
 #include <algorithm>
+#include <cuda_fp16.h>
 using namespace std;
 
 __device__ __constant__ float EPSILON = 0.00001f;
@@ -15,17 +16,6 @@ __device__ __constant__ float RAY_EPSILON = 0.0001f;
 __device__ __constant__ float PI = 3.141592f;
 __device__ __constant__ float SKY_RADIUS = 100.0f;
 __device__ __constant__ float MAX_FIREFLY_LUM = 15.0f;
-
-__device__ __constant__ bool SAMPLE_ENVIRONMENT = false;
-
-__device__ __constant__ bool BDPT_LIGHTTRACE = true;
-__device__ __constant__ bool BDPT_NEE = true;
-__device__ __constant__ bool BDPT_NAIVE = true;
-__device__ __constant__ bool BDPT_CONNECTION = true;
-
-__device__ __constant__ bool BDPT_DRAWPATH = false;
-__device__ __constant__ bool BDPT_DOMIS = true;
-__device__ __constant__ bool BDPT_PAINTWEIGHT = false;
 
 constexpr bool DO_PROGRESSIVERENDER = true;
 
@@ -142,6 +132,14 @@ inline __host__ __device__ __forceinline__ float clamp(float x, float minVal, fl
     return x;
 }
 
+inline __host__ __device__ __forceinline__ float4 clampf4(float4 v, float minVal, float maxVal) {
+    return make_float4(
+        clamp(v.x, minVal, maxVal),
+        clamp(v.y, minVal, maxVal),
+        clamp(v.z, minVal, maxVal),
+        0.0f
+    );
+}
 
 inline __host__ std::ostream& operator<< (std::ostream& out, const float4& v )
 {
@@ -292,4 +290,81 @@ __host__ inline bool parseBool(const std::string& val) {
     std::string v = val;
     std::transform(v.begin(), v.end(), v.begin(), ::tolower);
     return (v == "true");
+}
+
+__device__ __forceinline__ unsigned int toRGB9E5(float4 c)
+{
+    float maxRGB = fmaxf(c.x, fmaxf(c.y, c.z));
+    int expShared = maxRGB <= 1.0e-9f ? -16 : (int)floorf(log2f(maxRGB));
+    expShared = max(expShared, -16);
+    expShared = min(expShared, 15);
+    
+    float denom = powf(2.0f, (float)(expShared - 9 + 15));
+    int maxVal = (int)floorf(maxRGB / denom + 0.5f);
+    
+    if (maxVal > 511) { expShared++; denom *= 2.0f; }
+    
+    int r = (int)floorf(c.x / denom + 0.5f);
+    int g = (int)floorf(c.y / denom + 0.5f);
+    int b = (int)floorf(c.z / denom + 0.5f);
+    
+    return (unsigned int)((expShared + 15) << 27 | (b << 18) | (g << 9) | r);
+}
+
+__device__ __forceinline__ float4 fromRGB9E5(unsigned int packed)
+{
+    int exponent = (packed >> 27) - 15 - 9;
+    float scale = powf(2.0f, (float)exponent);
+    
+    float r = (float)(packed & 0x1FF) * scale;
+    float g = (float)((packed >> 9) & 0x1FF) * scale;
+    float b = (float)((packed >> 18) & 0x1FF) * scale;
+    
+    return f4(r, g, b, 1.0f); // Default alpha to 1
+}
+
+// Encodes a unit vector into 32 bits (2x 16-bit snorm) with minimal error.
+__device__ __forceinline__ float signNotZero(float k) { return (k >= 0.0f) ? 1.0f : -1.0f; }
+
+__device__ __forceinline__ unsigned int packOct(float4 v)
+{
+    float l1norm = fabsf(v.x) + fabsf(v.y) + fabsf(v.z);
+    float2 res = make_float2(v.x, v.y);
+    
+    if (l1norm > 0.0f) {
+        res.x /= l1norm;
+        res.y /= l1norm;
+    }
+
+    if (v.z < 0.0f) {
+        float tempX = (1.0f - fabsf(res.y)) * signNotZero(res.x);
+        float tempY = (1.0f - fabsf(res.x)) * signNotZero(res.y);
+        res.x = tempX;
+        res.y = tempY;
+    }
+    
+    // Compress to 16-bit SNORM
+    unsigned int x = (unsigned int)(fminf(fmaxf(res.x, -1.0f), 1.0f) * 32767.0f + 32767.5f);
+    unsigned int y = (unsigned int)(fminf(fmaxf(res.y, -1.0f), 1.0f) * 32767.0f + 32767.5f);
+    
+    return (y << 16) | x;
+}
+
+__device__ __forceinline__ float4 unpackOct(unsigned int packed)
+{
+    float2 res;
+    res.x = (float)(packed & 0xFFFF) / 32767.0f - 1.0f;
+    res.y = (float)(packed >> 16) / 32767.0f - 1.0f;
+    
+    float3 v = make_float3(res.x, res.y, 1.0f - fabsf(res.x) - fabsf(res.y));
+    
+    if (v.z < 0.0f) {
+        float tempX = (1.0f - fabsf(v.y)) * signNotZero(v.x);
+        float tempY = (1.0f - fabsf(v.x)) * signNotZero(v.y);
+        v.x = tempX;
+        v.y = tempY;
+    }
+    
+    float len = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
+    return f4(v.x / len, v.y / len, v.z / len, 0.0f); // Direction, alpha 0
 }

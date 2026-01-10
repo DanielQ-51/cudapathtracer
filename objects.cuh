@@ -9,6 +9,8 @@
 #include <sstream>
 #include <string>
 #include <fstream>
+#include <cuda_fp16.h>
+
 struct BVHnode
 {
     float4 aabbMIN;
@@ -473,10 +475,8 @@ struct PathVertices {
     bool* backface;
 };
 
-
 inline __device__ __forceinline__ int pathBufferIdx(int w, int h, int x, int y, int depth)
 {
-    //return (y * w + x) * maxDepth + depth;
     return (depth * w * h) + y * w + x;
 }
 
@@ -563,6 +563,7 @@ enum IntegratorChoice {
     UNIDIRECTIONAL = 0,
     BIDIRECTIONAL = 1,
     NAIVE_UNIDIRECTIONAL = 2,
+    VCM = 3
 };
 
 __host__ inline int matchIntegrator(std::string name)
@@ -570,6 +571,7 @@ __host__ inline int matchIntegrator(std::string name)
     if (name == "UNIDIRECTIONAL") return 0;
     else if (name == "BIDIRECTIONAL") return 1;
     else if (name == "NAIVE_UNIDIRECTIONAL") return 2;
+    else if (name == "VCM") return 3;
 
     std::cerr << "Invalid Integrator Choice!\n";
     return -1;
@@ -793,6 +795,8 @@ struct RenderConfig {
     int sampleCount = 0;
     int maxDepth = 0;
     int bvhLeafSize = 0;
+    bool sampleEnvironment = false;
+    bool postProcess = false;
 
     // BDPT Settings
     int bdptEyeDepth = 0;
@@ -901,6 +905,8 @@ __host__ inline bool loadConfig(const std::string& filepath, RenderConfig& confi
             else if (key == "BDPT_DOMIS") config.bdptDoMis = parseBool(value);
             else if (key == "BDPT_PAINTWEIGHT") config.bdptPaintWeight = parseBool(value);
             else if (key == "Pinhole Camera") config.pinholeCamera = parseBool(value);
+            else if (key == "SAMPLE_ENVIRONMENT") config.sampleEnvironment = parseBool(value);
+            else if (key == "Post Process") config.postProcess = parseBool(value);
 
             // Vectors & Floats
             else if (key == "Camera Position") config.camPos = parseVec3(value);
@@ -911,4 +917,261 @@ __host__ inline bool loadConfig(const std::string& filepath, RenderConfig& confi
         }
     }
     return true;
+}
+
+#define MASK_DELTA      (0x1)
+#define MASK_BACKFACE   (0x2)
+#define MASK_LIGHT      (0xFFFFC)      // 20 bits shifted by 2
+#define MASK_MAT        (0xFFC00000)
+
+/*
+A highly optimized data structure to acommodate for the large spatial complexity of VCM. Please hire me
+*/
+struct VCMPathVertices
+{
+    /* To avoid the extra space of the 4th part of a float4, but also to avoid the packing issues of a float3
+    separate floats are used instead of packing inside a uint because precision is important for positions.
+    */
+    float* pos_x; 
+    float* pos_y; 
+    float* pos_z;
+
+    /*
+    These are decoded into float3's essentially, but because of the covnention used in this renderer, we will turn them
+    to float4's in the kernels.
+    */
+    unsigned int* packedNormal;
+    unsigned int* packedWo;
+
+    // need to do shared exponent packing
+    unsigned int* packedBeta;
+
+    half2* packedUV;
+
+    /*
+    bit 1: isDelta
+    bit 2: backface
+    bit 3-22: light index
+    bit 23-32: material ID
+    */
+    unsigned int* packedInfo;
+    
+    float* d_vc;
+    float* d_vm;
+    float* d_vcm;
+};
+
+__device__ __forceinline__ void setAllInfo (VCMPathVertices& x, int idx, bool isDelta, bool isBackface, int lightID, int matID) 
+{
+    unsigned int info = 0;
+    info |= (isDelta ? 1u : 0u);
+    info |= (isBackface ? 1u : 0u) << 1;
+    info |= (unsigned int)(lightID & 0xFFFFF) << 2;
+    info |= (unsigned int)(matID & 0x3FF) << 22;
+    x.packedInfo[idx] = info;
+}
+
+__device__ __forceinline__ void getAllInfo(
+    const VCMPathVertices& x, 
+    int idx, 
+    bool& isDelta, 
+    bool& isBackface, 
+    int& lightID, 
+    int& matID
+) 
+{
+    unsigned int info = x.packedInfo[idx];
+
+    // Bit 0: isDelta
+    isDelta = (info & 1u);
+
+    // Bit 1: isBackface
+    isBackface = (info >> 1) & 1u;
+
+    // Bits 2-21: lightID (20 bits) -> Mask 0xFFFFF
+    lightID = (info >> 2) & 0xFFFFFu;
+
+    // Bits 22-31: matID (10 bits) -> Mask 0x3FF
+    matID = (info >> 22) & 0x3FFu;
+}
+
+__device__ __forceinline__ bool getIsDelta(const VCMPathVertices& x, int idx) {
+    return (x.packedInfo[idx] & 1u);
+}
+
+__device__ __forceinline__ bool getIsBackface(const VCMPathVertices& x, int idx) {
+    return (x.packedInfo[idx] >> 1) & 1u;
+}
+
+__device__ __forceinline__ int getLightIndex(const VCMPathVertices& x, int idx) {
+    return (x.packedInfo[idx] >> 2) & 0xFFFFF;
+}
+
+__device__ __forceinline__ int getMaterialID(const VCMPathVertices& x, int idx) {
+    return (x.packedInfo[idx] >> 22) & 0x3FF;
+}
+
+__device__ __forceinline__ void setIsDelta(VCMPathVertices& x, int idx, bool val) {
+    unsigned int current = x.packedInfo[idx];
+    current &= ~MASK_DELTA; // Clear bit
+    current |= (val ? 1u : 0u);
+    x.packedInfo[idx] = current;
+}
+
+__device__ __forceinline__ void setIsBackface(VCMPathVertices& x, int idx, bool val) {
+    unsigned int current = x.packedInfo[idx];
+    current &= ~MASK_BACKFACE;
+    current |= (val ? 1u : 0u) << 1;
+    x.packedInfo[idx] = current;
+}
+
+__device__ __forceinline__ void setLightIndex(VCMPathVertices& x, int idx, int val) {
+    unsigned int current = x.packedInfo[idx];
+    current &= ~MASK_LIGHT; // Clear 20 bits
+    current |= (unsigned int)(val & 0xFFFFF) << 2;
+    x.packedInfo[idx] = current;
+}
+
+__device__ __forceinline__ void setMaterialID(VCMPathVertices& x, int idx, int val) {
+    unsigned int current = x.packedInfo[idx];
+    current &= ~MASK_MAT; // Clear 10 bits
+    current |= (unsigned int)(val & 0x3FF) << 22;
+    x.packedInfo[idx] = current;
+}
+
+__device__ __forceinline__ float4 getPos(const VCMPathVertices& verts, int idx) 
+{
+    return f4(verts.pos_x[idx], verts.pos_y[idx], verts.pos_z[idx], 1.0f);
+}
+
+__device__ __forceinline__ void setPos(VCMPathVertices& verts, int idx, float4 p) 
+{
+    verts.pos_x[idx] = p.x;
+    verts.pos_y[idx] = p.y;
+    verts.pos_z[idx] = p.z;
+}
+
+__device__ __forceinline__ float4 getNormal(const VCMPathVertices& x, int idx) {
+    return unpackOct(x.packedNormal[idx]);
+}
+
+__device__ __forceinline__ void setNormal(VCMPathVertices& x, int idx, float4 n) {
+    x.packedNormal[idx] = packOct(n);
+}
+
+__device__ __forceinline__ float4 getWo(const VCMPathVertices& x, int idx) {
+    return unpackOct(x.packedWo[idx]);
+}
+
+__device__ __forceinline__ void setWo(VCMPathVertices& x, int idx, float4 wo) {
+    x.packedWo[idx] = packOct(wo);
+}
+
+__device__ __forceinline__ float4 getBeta(const VCMPathVertices& x, int idx) {
+    return fromRGB9E5(x.packedBeta[idx]);
+}
+
+__device__ __forceinline__ void setBeta(VCMPathVertices& x, int idx, float4 b) {
+    x.packedBeta[idx] = toRGB9E5(b);
+}
+
+__device__ __forceinline__ float2 getUV(const VCMPathVertices& x, int idx) {
+    return __half22float2(x.packedUV[idx]);
+}
+
+__device__ inline void setUV(VCMPathVertices& x, int idx, float2 uv) {
+    x.packedUV[idx] = __float22half2_rn(uv);
+}
+
+__device__ __forceinline__ float getD_vc(const VCMPathVertices& x, int idx) {
+    return x.d_vc[idx];
+}
+
+__device__ __forceinline__ void setD_vc(VCMPathVertices& x, int idx, float val) {
+    x.d_vc[idx] = val;
+}
+
+__device__ __forceinline__ float getD_vm(const VCMPathVertices& x, int idx) {
+    return x.d_vm[idx];
+}
+
+__device__ __forceinline__ void setD_vm(VCMPathVertices& x, int idx, float val) {
+    x.d_vm[idx] = val;
+}
+
+__device__ __forceinline__ float getD_vcm(const VCMPathVertices& x, int idx) {
+    return x.d_vcm[idx];
+}
+
+__device__ __forceinline__ void setD_vcm(VCMPathVertices& x, int idx, float val) {
+    x.d_vcm[idx] = val;
+}
+/*
+Struct containing photon data for vcm.
+*/
+struct Photons
+{
+    float* pos_x;
+    float* pos_y;
+    float* pos_z;
+
+    unsigned int* packedWi;
+
+    unsigned int* packedPower;
+
+    float* d_vc;
+    float* d_vm; 
+    float* d_vcm;
+};
+
+__device__ __forceinline__ float4 getPos(const Photons& ps, int idx) 
+{
+    return f4(ps.pos_x[idx], ps.pos_y[idx], ps.pos_z[idx], 1.0f);
+}
+
+__device__ __forceinline__ void setPos(Photons& ps, int idx, float4 p) 
+{
+    ps.pos_x[idx] = p.x;
+    ps.pos_y[idx] = p.y;
+    ps.pos_z[idx] = p.z;
+}
+
+__device__ __forceinline__ float4 getWi(const Photons& x, int idx) {
+    return unpackOct(x.packedWi[idx]);
+}
+
+__device__ __forceinline__ void setWi(Photons& x, int idx, float4 wi) {
+    x.packedWi[idx] = packOct(wi);
+}
+
+__device__ __forceinline__ float4 getBeta(const Photons& x, int idx) {
+    return fromRGB9E5(x.packedPower[idx]);
+}
+
+__device__ __forceinline__ void setBeta(Photons& x, int idx, float4 b) {
+    x.packedPower[idx] = toRGB9E5(b);
+}
+
+__device__ __forceinline__ float getD_vc(const Photons& x, int idx) {
+    return x.d_vc[idx];
+}
+
+__device__ __forceinline__ void setD_vc(Photons& x, int idx, float val) {
+    x.d_vc[idx] = val;
+}
+
+__device__ __forceinline__ float getD_vm(const Photons& x, int idx) {
+    return x.d_vm[idx];
+}
+
+__device__ __forceinline__ void setD_vm(Photons& x, int idx, float val) {
+    x.d_vm[idx] = val;
+}
+
+__device__ __forceinline__ float getD_vcm(const Photons& x, int idx) {
+    return x.d_vcm[idx];
+}
+
+__device__ __forceinline__ void setD_vcm(Photons& x, int idx, float val) {
+    x.d_vcm[idx] = val;
 }

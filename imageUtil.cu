@@ -42,7 +42,7 @@ struct BMPInfoHeader {
 
 void createBMPHeaders(int width, int height, BMPFileHeader &fileHeader, BMPInfoHeader &infoHeader);
 
-Image::Image(int w, int h) : width(w), height(h), pixels(std::vector<float4>(w * h)) {}
+Image::Image(int w, int h) : width(w), height(h), pixels(std::vector<float4>(w * h)), postProcess(true) {}
 
 Image::~Image() {}
 
@@ -65,6 +65,12 @@ float4 Image::getColor(int x, int y) {
 }
 
 void Image::saveImageBMP(std::string fileName) {
+
+    std::vector<float4> data = postProcess ? postProcessImage() : pixels;
+
+    if (postProcess)
+        std::cout << "saved with post processing\n";
+
     BMPFileHeader fileHeader;
     BMPInfoHeader infoHeader;
 
@@ -74,14 +80,13 @@ void Image::saveImageBMP(std::string fileName) {
     out.write((char*)&fileHeader, sizeof(fileHeader));
     out.write((char*)&infoHeader, sizeof(infoHeader));
 
-
     int rowSize = (3 * width + 3) & (~3); // each row padded to multiple of 4 bytes
 
     float4 c;
     std::vector<unsigned char> row(rowSize);
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
-            c = getColor(x, y);
+            c = data[toIndex(x, y)];
 
             row[x*3 + 0] = static_cast<unsigned char>(clamp(c.z, 0.0f, 1.0f) * 255.0f + 0.5f);
             row[x*3 + 1] = static_cast<unsigned char>(clamp(c.y, 0.0f, 1.0f) * 255.0f + 0.5f);
@@ -137,7 +142,7 @@ void Image::saveImageCSV_MONO(int choice)
     csvOut.close();
 }
 
-Image loadBMPToImage(const std::string &filename) {
+Image loadBMPToImage(const std::string &filename, bool isData) {
     std::ifstream in(filename, std::ios::binary);
     if (!in.is_open()) {
         std::cerr << "Failed to open BMP: " << filename << "\n";
@@ -174,6 +179,14 @@ Image loadBMPToImage(const std::string &filename) {
             float b = row[x*3 + 0] / 255.0f;
             float g = row[x*3 + 1] / 255.0f;
             float r = row[x*3 + 2] / 255.0f;
+
+            if (!isData)
+            {
+                r = powf(r, 2.2f);
+                g = powf(g, 2.2f);
+                b = powf(b, 2.2f);
+            }
+
             img.setColor(x, height - 1 - y, make_float4(r, g, b, 1.0f)); // flip y
         }
     }
@@ -185,6 +198,38 @@ Image loadBMPToImage(const std::string &filename) {
 std::vector<float4> Image::data()
 {
     return pixels;
+}
+
+float4 Image::toneMap(float4 color)
+{
+    const float A = 2.51f;
+    const float B = 0.03f;
+    const float C = 2.43f;
+    const float D = 0.59f;
+    const float E = 0.14f;
+
+    return clampf4((color * (A * color + f4(B))) / (color * (C * color + f4(D)) + f4(E)), 0.0f, 1.0f);
+}
+
+float4 Image::gammaCorrect(float4 c)
+{
+    float invGamma = 1.0f / 2.2f;
+    return f4(
+        powf(c.x, invGamma),
+        powf(c.y, invGamma),
+        powf(c.z, invGamma),
+        0.0f
+    );
+}
+
+std::vector<float4> Image::postProcessImage()
+{
+    std::vector<float4> processed;
+    for (int i = 0; i < width * height; i++)
+    {
+        processed.push_back(gammaCorrect(toneMap(pixels[i])));
+    }
+    return processed;
 }
 
 void createBMPHeaders(int width, int height, BMPFileHeader &fileHeader, BMPInfoHeader &infoHeader) {

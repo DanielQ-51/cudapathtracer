@@ -248,6 +248,8 @@ int initRender(string configPath, int renderNumber)
 
     auto start = std::chrono::high_resolution_clock::now();
 
+    updateConstants(config);
+
     int w = config.width;
     int h = config.height;
 
@@ -269,6 +271,7 @@ int initRender(string configPath, int renderNumber)
             config.camApeture, config.camFocalDist);
 
     Image image = Image(w, h);
+    image.postProcess = config.postProcess;
 
     if (integratorChoice == UNIDIRECTIONAL)
     {
@@ -293,6 +296,15 @@ int initRender(string configPath, int renderNumber)
             sampleCount << " samples per pixel, and a maximum leaf size of " <<
             maxLeafSize << " primitives, with a max depth of " << 
             maxDepth << ".\nIntergating with Naive Unidirectional" << 
+            endl << endl;
+    }
+    else if (integratorChoice == VCM)
+    {
+        cout << "Rendering at " << w << " by " << h << " pixels, with " << 
+            sampleCount << " samples per pixel, and a maximum leaf size of " <<
+            maxLeafSize << " primitives, with a max eye depth of " << 
+            eyePathDepth << ", and a max light depth of " << 
+            lightPathDepth << ".\nIntegrating with VCM." << 
             endl << endl;
     }
 
@@ -330,10 +342,10 @@ int initRender(string configPath, int renderNumber)
     vector<int> startIndices;
     int currentStartIndex = 0;
 
-    images.push_back(loadBMPToImage("textures/enkidutexture.bmp"));
-    images.push_back(loadBMPToImage("textures/enkiduchibitexture.bmp"));
-    images.push_back(loadBMPToImage("textures/leaftex2.bmp"));
-    images.push_back(loadBMPToImage("textures/leafautumn.bmp"));
+    images.push_back(loadBMPToImage("textures/enkidutexture.bmp", false));
+    images.push_back(loadBMPToImage("textures/enkiduchibitexture.bmp", false));
+    images.push_back(loadBMPToImage("textures/leaftex2.bmp", false));
+    images.push_back(loadBMPToImage("textures/leafautumn.bmp", false));
 
     for (Image i : images)
     {
@@ -364,6 +376,9 @@ int initRender(string configPath, int renderNumber)
     Material lambertWhite = Material::Diffuse(f4(0.9f,0.9f,0.9f));
     Material lambertGreen = Material::Diffuse(f4(0.2f,0.6f,0.6f));
     Material lambertRed = Material::Diffuse(f4(0.90f,0.1f,0.1f));
+    Material lambertBLACK = Material::Diffuse(f4(0.0f,0.0f,0.0f));
+    Material lambert95 = Material::Diffuse(f4(0.95f,0.95f,0.95f));
+    Material lambert50 = Material::Diffuse(f4(0.5f,0.5f,0.5f));
 
     float4 eta_steel = f4(0.14f, 0.16f, 0.13f, 1.0f);   // real part (R,G,B,alpha)
     float4 k_steel   = f4(4.1f, 2.3f, 3.1f, 1.0f);     // imaginary part (absorption)
@@ -419,6 +434,9 @@ int initRender(string configPath, int renderNumber)
     mats.push_back(lambertGrey); // index 17
     mats.push_back(diamond); // index 18
     mats.push_back(mirror); // index 19
+    mats.push_back(lambertBLACK); // index 20
+    mats.push_back(lambert95); // index 21
+    mats.push_back(lambert50); // index 22
 
     Material* mats_d;
 
@@ -587,7 +605,9 @@ int initRender(string configPath, int renderNumber)
 
         cudaMemcpy(lightPath_d, &tempPaths1, sizeof(PathVertices), cudaMemcpyHostToDevice);
 
-        launch_bidirectional(eyePathDepth, lightPathDepth, camera, eyePath_d, lightPath_d, mats_d, textures_d, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, w, h, sceneCenter, sceneRadius, out_colors, out_overlay);
+        launch_bidirectional(eyePathDepth, lightPathDepth, camera, eyePath_d, lightPath_d, mats_d, textures_d, BVH, 
+            BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, w, h, 
+            sceneCenter, sceneRadius, out_colors, out_overlay, config.postProcess);
         cudaFree(eyePath_d);
         cudaFree(lightPath_d);
 
@@ -623,6 +643,96 @@ int initRender(string configPath, int renderNumber)
     {
         launch_naive_unidirectional(maxDepth, camera, mats_d, textures_d, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, true, w, h, out_colors);
     }
+    else if (integratorChoice == VCM)
+    {
+        int totalLightPathVertices = w * h * lightPathDepth;
+
+        VCMPathVertices* lightPath_d;
+        cudaMalloc(&lightPath_d, sizeof(PathVertices));
+
+        VCMPathVertices tempPaths;
+
+        cudaMalloc(&tempPaths.pos_x, sizeof(float) * totalLightPathVertices);
+        cudaMalloc(&tempPaths.pos_y, sizeof(float) * totalLightPathVertices);
+        cudaMalloc(&tempPaths.pos_z, sizeof(float) * totalLightPathVertices);
+        cudaMalloc(&tempPaths.packedNormal, sizeof(unsigned int) * totalLightPathVertices);
+        cudaMalloc(&tempPaths.packedWo, sizeof(unsigned int) * totalLightPathVertices);
+        cudaMalloc(&tempPaths.packedBeta, sizeof(unsigned int) * totalLightPathVertices);
+        cudaMalloc(&tempPaths.packedInfo, sizeof(unsigned int) * totalLightPathVertices);
+        cudaMalloc(&tempPaths.packedUV, sizeof(half2) * totalLightPathVertices);
+        cudaMalloc(&tempPaths.d_vc, sizeof(float) * totalLightPathVertices);
+        cudaMalloc(&tempPaths.d_vcm, sizeof(float) * totalLightPathVertices);
+        cudaMalloc(&tempPaths.d_vm, sizeof(float) * totalLightPathVertices);
+
+        cudaMemset(tempPaths.pos_x, 0, sizeof(float) * totalLightPathVertices);
+        cudaMemset(tempPaths.pos_y, 0, sizeof(float) * totalLightPathVertices);
+        cudaMemset(tempPaths.pos_z, 0, sizeof(float) * totalLightPathVertices);
+        cudaMemset(tempPaths.packedNormal, 0, sizeof(unsigned int) * totalLightPathVertices);
+        cudaMemset(tempPaths.packedWo, 0, sizeof(unsigned int) * totalLightPathVertices);
+        cudaMemset(tempPaths.packedBeta, 0, sizeof(unsigned int) * totalLightPathVertices);
+        cudaMemset(tempPaths.packedInfo, 0, sizeof(unsigned int) * totalLightPathVertices);
+        cudaMemset(tempPaths.packedUV, 0, sizeof(half2) * totalLightPathVertices);
+        cudaMemset(tempPaths.d_vc, 0, sizeof(float) * totalLightPathVertices);
+        cudaMemset(tempPaths.d_vcm, 0, sizeof(float) * totalLightPathVertices);
+        cudaMemset(tempPaths.d_vm, 0, sizeof(float) * totalLightPathVertices);
+
+        cudaMemcpy(lightPath_d, &tempPaths, sizeof(VCMPathVertices), cudaMemcpyHostToDevice);
+        
+        int totalPhotons = w * h * (lightPathDepth - 1); // light vertex not stored
+
+        Photons* photons_d;
+        cudaMalloc(&photons_d, sizeof(Photons));
+
+        Photons tempPhotons;
+        cudaMalloc(&tempPhotons.pos_x, sizeof(float) * totalPhotons);
+        cudaMalloc(&tempPhotons.pos_y, sizeof(float) * totalPhotons);
+        cudaMalloc(&tempPhotons.pos_z, sizeof(float) * totalPhotons);
+        cudaMalloc(&tempPhotons.packedWi, sizeof(unsigned int) * totalPhotons);
+        cudaMalloc(&tempPhotons.packedPower, sizeof(unsigned int) * totalPhotons);
+        cudaMalloc(&tempPhotons.d_vc, sizeof(float) * totalPhotons);
+        cudaMalloc(&tempPhotons.d_vcm, sizeof(float) * totalPhotons);
+        cudaMalloc(&tempPhotons.d_vm, sizeof(float) * totalPhotons);
+
+        cudaMemset(tempPhotons.pos_x, 0, sizeof(float) * totalPhotons);
+        cudaMemset(tempPhotons.pos_y, 0, sizeof(float) * totalPhotons);
+        cudaMemset(tempPhotons.pos_z, 0, sizeof(float) * totalPhotons);
+        cudaMemset(tempPhotons.packedWi, 0, sizeof(unsigned int) * totalPhotons);
+        cudaMemset(tempPhotons.packedPower, 0, sizeof(unsigned int) * totalPhotons);
+        cudaMemset(tempPhotons.d_vc, 0, sizeof(float) * totalPhotons);
+        cudaMemset(tempPhotons.d_vcm, 0, sizeof(float) * totalPhotons);
+        cudaMemset(tempPhotons.d_vm, 0, sizeof(float) * totalPhotons);
+
+        cudaMemcpy(photons_d, &tempPhotons, sizeof(Photons), cudaMemcpyHostToDevice);
+        
+
+        // launch kernel
+
+        cudaFree(lightPath_d);
+
+        cudaFree(tempPaths.pos_x);
+        cudaFree(tempPaths.pos_y);
+        cudaFree(tempPaths.pos_z);
+        cudaFree(tempPaths.packedNormal);
+        cudaFree(tempPaths.packedWo);
+        cudaFree(tempPaths.packedBeta);
+        cudaFree(tempPaths.packedInfo);
+        cudaFree(tempPaths.packedUV);
+        cudaFree(tempPaths.d_vc);
+        cudaFree(tempPaths.d_vcm);
+        cudaFree(tempPaths.d_vm);
+
+        cudaFree(photons_d);
+        
+        cudaFree(tempPhotons.pos_x);
+        cudaFree(tempPhotons.pos_y);
+        cudaFree(tempPhotons.pos_z);
+        cudaFree(tempPhotons.packedPower);
+        cudaFree(tempPhotons.packedWi);
+        cudaFree(tempPhotons.d_vcm);
+        cudaFree(tempPhotons.d_vc);
+        cudaFree(tempPhotons.d_vm);
+    }
+    
 
     
 
@@ -806,10 +916,10 @@ int main ()
     vector<int> startIndices;
     int currentStartIndex = 0;
 
-    images.push_back(loadBMPToImage("textures/enkidutexture.bmp"));
-    images.push_back(loadBMPToImage("textures/enkiduchibitexture.bmp"));
-    images.push_back(loadBMPToImage("textures/leaftex2.bmp"));
-    images.push_back(loadBMPToImage("textures/leafautumn.bmp"));
+    images.push_back(loadBMPToImage("textures/enkidutexture.bmp", false));
+    images.push_back(loadBMPToImage("textures/enkiduchibitexture.bmp", false));
+    images.push_back(loadBMPToImage("textures/leaftex2.bmp", false));
+    images.push_back(loadBMPToImage("textures/leafautumn.bmp", false));
 
     for (Image i : images)
     {
@@ -1110,7 +1220,7 @@ int main ()
 
         cudaMemcpy(lightPath_d, &tempPaths1, sizeof(PathVertices), cudaMemcpyHostToDevice);
 
-        launch_bidirectional(eyePathDepth, lightPathDepth, camera, eyePath_d, lightPath_d, mats_d, textures_d, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, w, h, sceneCenter, sceneRadius, out_colors, out_overlay);
+        launch_bidirectional(eyePathDepth, lightPathDepth, camera, eyePath_d, lightPath_d, mats_d, textures_d, BVH, BVHindices, verts, points.size(), scene, mesh.size(), lights, lightsvec.size(), sampleCount, w, h, sceneCenter, sceneRadius, out_colors, out_overlay, false);
         cudaFree(eyePath_d);
         cudaFree(lightPath_d);
 

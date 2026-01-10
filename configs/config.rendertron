@@ -4,13 +4,15 @@ width: 800
 height: 800
 
 Integrator: BIDIRECTIONAL
-Sample Count: 5000
+Sample Count: 500000
+Post Process: false
 
 Unidirectional Max Depth: 40
 BVH recommended leaf size: 2
 
+SAMPLE_ENVIRONMENT: false
 BDPT Specifc Settings:
-Bidirectional Eye Depth: 12
+Bidirectional Eye Depth: 16
 Bidirectional Light Depth: 12
 
 BDPT_LIGHTTRACE: true
@@ -27,11 +29,10 @@ Camera Position: 0.0 0.0 1.0
 Camera Rotation: 0.0 0.0 0.0
 Camera Apeture: 0.0
 Camera FocalDist: 0.0
-Camera FOV: 60.0
+Camera FOV: 50.0
 
 Meshes (path; multiplier * emission; materialID):
-scenedata/smallbox.obj; 1.0 * (0.0, 0.0, 0.0); 2
-scenedata/leftwall.obj; 1.0 * (0.0, 0.0, 0.0); 1
-scenedata/rightwall.obj; 1.0 * (0.0, 0.0, 0.0); 3
-scenedata/waterway3.obj; 1.0 * (0.0, 0.0, 0.0); 10
-scenedata/verybiglight.obj; 0.1 * (7.0, 7.0, 7.0); 2
+scenedata/smallbox.obj; 2.0 * (0.5, 0.5, 0.5); 20
+scenedata/leftwall.obj; 2.0 * (0.5, 0.5, 0.5); 20
+scenedata/rightwall.obj; 2.0 * (0.5, 0.5, 0.5); 20
+scenedata/waterway3.obj; 1.0 * (0.0, 0.0, 0.0); 5
