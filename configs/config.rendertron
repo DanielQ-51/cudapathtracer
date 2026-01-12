@@ -3,7 +3,7 @@ Name: render
 width: 800
 height: 800
 
-Integrator: BIDIRECTIONAL
+Integrator: VCM
 Sample Count: 500000
 Post Process: true
 
@@ -39,4 +39,4 @@ scenedata/smallbox.obj; 1.0 * (0.0, 0.0, 0.0); 2
 scenedata/leftwall.obj; 1.0 * (0.0, 0.0, 0.0); 1
 scenedata/rightwall.obj; 1.0 * (0.0, 0.0, 0.0); 3
 scenedata/waterCaustic2.obj; 1.0 * (0.0, 0.0, 0.0); 10
-scenedata/smallwaterlight5.obj; 15.0 * (8.0, 8.0, 8.0); 2
+scenedata/smallwaterlight5.obj; 25.0 * (8.0, 8.0, 8.0); 2

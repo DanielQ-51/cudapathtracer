@@ -649,8 +649,8 @@ int initRender(string configPath, int renderNumber)
     {
         int totalLightPathVertices = w * h * lightPathDepth;
 
-        VCMPathVertices* lightPath_d;
-        cudaMalloc(&lightPath_d, sizeof(PathVertices));
+        //VCMPathVertices* lightPath_d;
+        //cudaMalloc(&lightPath_d, sizeof(VCMPathVertices));
 
         VCMPathVertices tempPaths;
 
@@ -678,12 +678,12 @@ int initRender(string configPath, int renderNumber)
         cudaMemset(tempPaths.d_vcm, 0, sizeof(float) * totalLightPathVertices);
         cudaMemset(tempPaths.d_vm, 0, sizeof(float) * totalLightPathVertices);
 
-        cudaMemcpy(lightPath_d, &tempPaths, sizeof(VCMPathVertices), cudaMemcpyHostToDevice);
+        //cudaMemcpy(lightPath_d, &tempPaths, sizeof(VCMPathVertices), cudaMemcpyHostToDevice);
         
         int totalPhotons = w * h * lightPathDepth;
 
-        Photons* photons_d;
-        cudaMalloc(&photons_d, sizeof(Photons));
+        //Photons* photons_d;
+        //cudaMalloc(&photons_d, sizeof(Photons));
 
         Photons tempPhotons;
         cudaMalloc(&tempPhotons.pos_x, sizeof(float) * totalPhotons);
@@ -704,10 +704,10 @@ int initRender(string configPath, int renderNumber)
         cudaMemset(tempPhotons.d_vcm, 0, sizeof(float) * totalPhotons);
         cudaMemset(tempPhotons.d_vm, 0, sizeof(float) * totalPhotons);
 
-        cudaMemcpy(photons_d, &tempPhotons, sizeof(Photons), cudaMemcpyHostToDevice);
+        //cudaMemcpy(photons_d, &tempPhotons, sizeof(Photons), cudaMemcpyHostToDevice);
 
-        Photons* photons_sorted_d;
-        cudaMalloc(&photons_sorted_d, sizeof(Photons));
+        //Photons* photons_sorted_d;
+        //cudaMalloc(&photons_sorted_d, sizeof(Photons));
 
         Photons tempPhotons1;
         cudaMalloc(&tempPhotons1.pos_x, sizeof(float) * totalPhotons);
@@ -728,12 +728,27 @@ int initRender(string configPath, int renderNumber)
         cudaMemset(tempPhotons1.d_vcm, 0, sizeof(float) * totalPhotons);
         cudaMemset(tempPhotons1.d_vm, 0, sizeof(float) * totalPhotons);
 
-        cudaMemcpy(photons_sorted_d, &tempPhotons1, sizeof(Photons), cudaMemcpyHostToDevice);
+        //cudaMemcpy(photons_sorted_d, &tempPhotons1, sizeof(Photons), cudaMemcpyHostToDevice);
         
 
         // launch kernel
+        launch_VCM(
+            eyePathDepth, lightPathDepth, 
+            camera, 
+            &tempPaths, 
+            &tempPhotons, &tempPhotons1, 
+            mats_d, textures_d, 
+            BVH, BVHindices, 
+            verts, points.size(), 
+            scene, mesh.size(), 
+            lights, lightsvec.size(), sampleCount, 
+            w, h, 
+            sceneCenter, sceneRadius, sceneMin,
+            out_colors, out_overlay,
+            config.postProcess, VCMMergeConstant, VCMInitialMergeRadiusMultiplier
+        );
 
-        cudaFree(lightPath_d);
+        //cudaFree(lightPath_d);
 
         cudaFree(tempPaths.pos_x);
         cudaFree(tempPaths.pos_y);
@@ -747,7 +762,7 @@ int initRender(string configPath, int renderNumber)
         cudaFree(tempPaths.d_vcm);
         cudaFree(tempPaths.d_vm);
 
-        cudaFree(photons_d);
+        //cudaFree(photons_d);
         
         cudaFree(tempPhotons.pos_x);
         cudaFree(tempPhotons.pos_y);
@@ -758,7 +773,7 @@ int initRender(string configPath, int renderNumber)
         cudaFree(tempPhotons.d_vc);
         cudaFree(tempPhotons.d_vm);
 
-        cudaFree(photons_sorted_d);
+        //cudaFree(photons_sorted_d);
         
         cudaFree(tempPhotons1.pos_x);
         cudaFree(tempPhotons1.pos_y);

@@ -404,23 +404,6 @@ __host__ inline int GetNextPrime(int n) {
     return n;
 }
 
-__device__ inline unsigned int ComputeGridHash(float4 pos, float4 sceneMin, float mergeRadius, int hashTableSize) {
-    // 1. Quantize: Find 3D Grid Integer Coordinate
-    int3 gridPos;
-    gridPos.x = floorf((pos.x - sceneMin.x) / mergeRadius);
-    gridPos.y = floorf((pos.y - sceneMin.y) / mergeRadius);
-    gridPos.z = floorf((pos.z - sceneMin.z) / mergeRadius);
-
-    // 2. Hash: Map 3D -> 1D
-    // Primes are used to scramble the bits to avoid patterns
-    gridPos.x = gridPos.x * 73856093;
-    gridPos.y = gridPos.y * 19349663;
-    gridPos.z = gridPos.z * 83492791;
-    
-    uint32_t hash = (gridPos.x ^ gridPos.y ^ gridPos.z) % hashTableSize;
-    return hash;
-}
-
 __host__ inline float calculateMergeRadius(float initialRadius, float alpha, int currSample)
 {
     return initialRadius * sqrtf( 1.0f / powf(currSample + 1, alpha));

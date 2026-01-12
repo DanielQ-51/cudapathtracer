@@ -377,133 +377,41 @@ __global__ void cleanAndFormatImage(
     outputBuffer[pixelIndex] = finalColor;
 }
 
-__global__ void computeHashes(
-    Photons photons, 
-    int photonCount, 
-    unsigned int* d_hash_keys, 
-    unsigned int* d_indices, 
-    float4 sceneMin, 
-    float mergeRadius, 
-    int hashTableSize
-)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= photonCount) return;
-
-    float4 p = getPos(photons, i);
-
-    d_hash_keys[i] = ComputeGridHash(p, sceneMin, mergeRadius, hashTableSize);
-    d_indices[i] = i;
-}
-
-__global__ void reorderPhotons(
-    Photons photons, 
-    Photons photons_sorted, 
-    int photonCount,
-    unsigned int* d_indices_out
-)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= photonCount) return;
-
-    int src = d_indices_out[i];
-
-    /*
-    It is not neccesary to unpack the values, we just copy them over directly
-    */
-    photons_sorted.pos_x[i] = photons.pos_x[src];
-    photons_sorted.pos_y[i] = photons.pos_y[src];
-    photons_sorted.pos_z[i] = photons.pos_z[src];
-    photons_sorted.packedPower[i] = photons.packedPower[src];
-    photons_sorted.packedWi[i] = photons.packedWi[src];
-    photons_sorted.d_vc[i] = photons.d_vc[src];
-    photons_sorted.d_vcm[i] = photons.d_vcm[src];
-    photons_sorted.d_vm[i] = photons.d_vm[src];
-}
-
-__global__ void buildTable(
-    unsigned int* d_hashes_sorted,
-    unsigned int* d_cell_start,
-    unsigned int* d_cell_end,
-    int numPhotons
-)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= numPhotons) return;
-
-    unsigned int hash = d_hashes_sorted[i];
-
-    if (i == 0 || d_hashes_sorted[i - 1] != hash) {
-        d_cell_start[hash] = i; 
-    }
-
-    if (i == numPhotons - 1 || d_hashes_sorted[i + 1] != hash) {
-        d_cell_end[hash] = i + 1;
-    }
-}
-
-__host__ inline void buildHashGrid(
-    Photons* photons, 
-    Photons* photons_sorted, 
-    int photonCount,
-    unsigned int* d_hash_keys_in,
-    unsigned int* d_hash_keys_out,
-    unsigned int* d_indices_in,
-    unsigned int* d_indices_out,
-    void* d_temp_storage,
-    size_t temp_storage_bytes,
-    unsigned int* d_cell_start,
-    unsigned int* d_cell_end,
-    float4 sceneMin, 
-    float mergeRadius, 
-    int hashTableSize
-)
-{
-    int blockSize = 256;
-    int numBlocks = (photonCount + blockSize - 1) / blockSize;
-
-    computeHashes<<<numBlocks, blockSize>>>(
-        *photons,
-        photonCount,
-        d_hash_keys_in,
-        d_indices_in,
-        sceneMin,
-        mergeRadius,
-        hashTableSize
-    );
-
-    cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
-        d_hash_keys_in, d_hash_keys_out, d_indices_in, d_indices_out, photonCount);
-
-    reorderPhotons<<<numBlocks, blockSize>>>(
-        *photons,
-        *photons_sorted, 
-        photonCount,
-        d_indices_out
-    );
-
-    cudaMemset(d_cell_start, 0xFF, hashTableSize * sizeof(unsigned int));
-    cudaMemset(d_cell_end,   0xFF, hashTableSize * sizeof(unsigned int));
-
-    buildTable<<<numBlocks, blockSize>>>(
-        d_hash_keys_out,
-        d_cell_start,
-        d_cell_end,
-        photonCount
+__device__ int3 GetGridIndex(float4 p, float4 sceneMin, float cellSize) {
+    return make_int3(
+        floorf((p.x - sceneMin.x) / cellSize),
+        floorf((p.y - sceneMin.y) / cellSize),
+        floorf((p.z - sceneMin.z) / cellSize)
     );
 }
 
-__global__ void initRNG(curandState* states, int width, int height, unsigned long seed)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) return;
+__device__ inline unsigned int ComputeGridHash(float4 pos, float4 sceneMin, float mergeRadius, int hashTableSize) {
+    // 1. Quantize: Find 3D Grid Integer Coordinate
+    int3 gridPos;
+    gridPos.x = floorf((pos.x - sceneMin.x) / mergeRadius);
+    gridPos.y = floorf((pos.y - sceneMin.y) / mergeRadius);
+    gridPos.z = floorf((pos.z - sceneMin.z) / mergeRadius);
 
-    int idx = y * width + x;
-    curand_init(seed, idx, 0, &states[idx]);  
+    // 2. Hash: Map 3D -> 1D
+    // Primes are used to scramble the bits to avoid patterns
+    gridPos.x = gridPos.x * 73856093;
+    gridPos.y = gridPos.y * 19349663;
+    gridPos.z = gridPos.z * 83492791;
+    
+    uint32_t hash = (gridPos.x ^ gridPos.y ^ gridPos.z) % hashTableSize;
+    return hash;
 }
 
-__device__ void removeMaterialFromStack(int* stack, int* stackTop, int materialID)
+__device__ inline unsigned int HashGridIndex(int3 gridPos, int hashTableSize) {
+    const unsigned int p1 = 73856093;
+    const unsigned int p2 = 19349663;
+    const unsigned int p3 = 83492791;
+
+    unsigned int n = (p1 * gridPos.x) ^ (p2 * gridPos.y) ^ (p3 * gridPos.z);
+    return n % hashTableSize;
+}
+
+__device__ inline void removeMaterialFromStack(int* stack, int* stackTop, int materialID)
 {
     int i_found = -1;
     for (int i = (*stackTop) - 1; i > 0; i--)
