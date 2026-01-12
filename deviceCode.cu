@@ -1,16 +1,10 @@
-
-#include <cuda_runtime.h>
-#include <cuda.h>
-#include <math.h>
-#include "util.cuh"
-#include "objects.cuh"
+#include "integratorUtilities.cuh"
 #include "reflectors.cuh"
-#include "imageUtil.cuh"
+#include "deviceCode.cuh"
 #include <chrono>
-#include <fstream>
-#include <vector>
-#include <string>
-#include <curand_kernel.h>
+#include <iostream>
+#include "imageUtil.cuh"
+#include <cub/cub.cuh>
 
 __device__ __constant__ bool SAMPLE_ENVIRONMENT = false;
 
@@ -50,345 +44,6 @@ __host__ void updateConstants(RenderConfig& config)
     return;
 }
 
-__device__ bool triangleIntersect(Vertices* verts, Triangle* tri, const Ray& r, float4& barycentric, float& tval)
-{
-    float4 tria = verts->positions[tri->aInd];
-    float4 trib = verts->positions[tri->bInd];
-    float4 tric = verts->positions[tri->cInd];
-    float4 e1 = trib - tria;
-    float4 e2 = tric - tria;
-
-    float4 h = cross3(r.direction, e2);
-    float a = dot(h, e1);
-
-    if (fabsf(a) < 1e-12f) 
-        return false;
-    
-    float f = 1.0/a;
-
-    float4 s = r.origin-tria;
-    float u = f * dot(s, h);
-    float4 q = cross3(s, e1);
-    float v = f * dot(r.direction, q);
-    float t = f * dot(e2, q);
-
-
-    if (((u >= 0) && (v >= 0) && (u + v <= 1)) && t > 0.0f)
-    {
-        barycentric = f4(u, v, 1.0f-u-v);
-        tval = t;
-        return true;
-    }
-    else
-    {
-        barycentric = f4();
-        return false;
-    }
-}
-
-__device__ bool aabbIntersect(const Ray& r, float4 minCorner, float4 maxCorner, float& tmin, float& tmax)
-{
-    tmin = -1e30f; // initialize to -infinity
-    tmax = 1e30f;  // initialize to +infinity
-
-    // Compute inverse ray direction once
-    float4 invDir = make_float4(
-        1.0f / r.direction.x,
-        1.0f / r.direction.y,
-        1.0f / r.direction.z,
-        0.0f
-    );
-
-    // X axis
-    float tx1 = (minCorner.x - r.origin.x) * invDir.x;
-    float tx2 = (maxCorner.x - r.origin.x) * invDir.x;
-    float tx_min = fminf(tx1, tx2);
-    float tx_max = fmaxf(tx1, tx2);
-    tmin = fmaxf(tmin, tx_min);
-    tmax = fminf(tmax, tx_max);
-
-    // Y axis
-    float ty1 = (minCorner.y - r.origin.y) * invDir.y;
-    float ty2 = (maxCorner.y - r.origin.y) * invDir.y;
-    float ty_min = fminf(ty1, ty2);
-    float ty_max = fmaxf(ty1, ty2);
-    tmin = fmaxf(tmin, ty_min);
-    tmax = fminf(tmax, ty_max);
-
-    // Z axis
-    float tz1 = (minCorner.z - r.origin.z) * invDir.z;
-    float tz2 = (maxCorner.z - r.origin.z) * invDir.z;
-    float tz_min = fminf(tz1, tz2);
-    float tz_max = fmaxf(tz1, tz2);
-    tmin = fmaxf(tmin, tz_min);
-    tmax = fminf(tmax, tz_max);
-    
-    return (tmax >= tmin) && (tmax > 0.0f);
-}
-
-__device__ void BVHSceneIntersect(const Ray& r, BVHnode* BVH, int* BVHindices, Vertices* verts, Triangle* scene, Intersection& intersect, float max_t = 999999.0f, int skipTri = -1)
-{
-    intersect.valid = false;
-    float min_t = 3.402823466e+38f;
-
-    int nodeStack[128];
-    int stackTop = 0;
-    nodeStack[stackTop++] = 0; // Push the root node (index 0)
-
-    while (stackTop > 0)
-    {
-        // Pop the next node to check
-        int currentIndex = nodeStack[--stackTop];
-        BVHnode& node = BVH[currentIndex];
-
-        // 2. If it's a leaf node, check its triangles
-        if (node.primCount > 0)
-        {
-            for (int i = node.first; i < node.primCount + node.first; i++)
-            {
-                int idx = BVHindices[i];
-                if (idx == skipTri) continue;
-                Triangle* tri = &scene[idx];
-                float4 barycentric;
-                float t;
-                bool hitTri = triangleIntersect(verts, tri, r, barycentric, t);
-
-                if (hitTri && (t < min_t) && (t < max_t))
-                {
-                    min_t = t; // Update the closest-hit distance
-                    intersect.point = r.at(t);
-                    intersect.color = verts->colors[tri->aInd] * barycentric.z + 
-                                        verts->colors[tri->bInd] * barycentric.x + 
-                                        verts->colors[tri->cInd] * barycentric.y;
-                    intersect.normal = normalize(verts->normals[tri->naInd] * barycentric.z + 
-                                        verts->normals[tri->nbInd] * barycentric.x + 
-                                        verts->normals[tri->ncInd] * barycentric.y);
-
-                    intersect.uv = verts->uvs[tri->uvaInd] * barycentric.z + 
-                        verts->uvs[tri->uvbInd] * barycentric.x + 
-                        verts->uvs[tri->uvcInd] * barycentric.y;
-                    if (dot(intersect.normal, r.direction) > 0.0f) 
-                    {
-                        intersect.normal = -intersect.normal;
-                        intersect.backface = true;
-                    }
-                    else 
-                    {
-                        intersect.backface = false;
-                    }
-                        
-                    intersect.materialID = tri->materialID;
-                    intersect.emission = tri->emission;
-                    intersect.valid = true;
-                    //intersect.tri = *tri; // could be bad for performance
-                    intersect.triIDX = idx;
-
-                    intersect.dist = t;
-                }
-            }
-        }
-        // 3. If it's an internal node, push its children onto the stack
-        else
-        {
-            if (node.left >= 0 || node.right >= 0)
-            {
-                float tminL, tmaxL, tminR, tmaxR;
-                bool hitLeft = false, hitRight = false;
-
-                // Test left child if it exists
-                if (node.left >= 0)
-                    hitLeft = aabbIntersect(r, BVH[node.left].aabbMIN, BVH[node.left].aabbMAX, tminL, tmaxL);
-
-                // Test right child if it exists
-                if (node.right >= 0)
-                    hitRight = aabbIntersect(r, BVH[node.right].aabbMIN, BVH[node.right].aabbMAX, tminR, tmaxR);
-
-                // If both children were hit, push the farther one first
-                if (hitLeft && hitRight)
-                {
-                    if (tminL < tminR)
-                    {
-                        nodeStack[stackTop++] = node.right; // farther
-                        nodeStack[stackTop++] = node.left;  // nearer
-                    }
-                    else
-                    {
-                        nodeStack[stackTop++] = node.left;  // farther
-                        nodeStack[stackTop++] = node.right; // nearer
-                    }
-                }
-                else if (hitLeft)
-                {
-                    nodeStack[stackTop++] = node.left;
-                }
-                else if (hitRight)
-                {
-                    nodeStack[stackTop++] = node.right;
-                }
-            }
-        }
-    }
-}
-
-__device__ void BVHShadowRay(const Ray& r, BVHnode* BVH, int* BVHindices, Vertices* verts, Triangle* scene, Material* materials, float4& throughputScale, float max_t, int skip_tri)
-{
-    int nodeStack[128];
-    int stackTop = 0;
-    nodeStack[stackTop++] = 0; // Push the root node (index 0)
-
-    throughputScale = f4(1.0f);
-    while (stackTop > 0)
-    {
-        // Pop the next node to check
-        int currentIndex = nodeStack[--stackTop];
-        BVHnode& node = BVH[currentIndex];
-
-        // 2. If it's a leaf node, check its triangles
-        if (node.primCount > 0)
-        {
-            for (int i = node.first; i < node.primCount + node.first; i++)
-            {
-                int idx = BVHindices[i];
-                Triangle* tri = &scene[idx];
-                float4 barycentric;
-                float t;
-                bool hitTri = triangleIntersect(verts, tri, r, barycentric, t);
-
-                if (idx == skip_tri)
-                    continue;
-
-                if (hitTri && (t < max_t))
-                {
-                    int matID = tri->materialID;
-                    if (materials[matID].type == MAT_LEAF)
-                    {
-                        // 1. We hit a leaf. Don't stop. Just darken the ray.
-                        float4 transColor = materials[matID].albedo;
-                        float transmission = materials[matID].transmission;
-                        
-                        float4 n = verts->normals[tri->naInd] * barycentric.z + 
-                        verts->normals[tri->nbInd] * barycentric.x + 
-                        verts->normals[tri->ncInd] * barycentric.y;
-                        
-                        float cosTheta = fabsf(dot(r.direction, normalize(n)));
-                        
-                        float F = schlick_fresnel(cosTheta, 1.0f, materials[matID].ior);
-                        
-                        throughputScale *= transColor * transmission * (1.0f - F);
-
-                        if (fmaxf(throughputScale.x, fmaxf(throughputScale.y, throughputScale.z)) < 0.01f) 
-                        {
-                            throughputScale = f4(0.0f);
-                            return;
-                        }
-                    }
-                    else 
-                    {
-                        throughputScale = f4(0.0f);
-                        return;
-                    }
-                }
-            }
-        }
-        else
-        {
-            if (node.left >= 0 || node.right >= 0)
-            {
-                float tminL, tmaxL, tminR, tmaxR;
-                bool hitLeft = false, hitRight = false;
-
-                // Test left child if it exists
-                if (node.left >= 0)
-                    hitLeft = aabbIntersect(r, BVH[node.left].aabbMIN, BVH[node.left].aabbMAX, tminL, tmaxL);
-
-                // Test right child if it exists
-                if (node.right >= 0)
-                    hitRight = aabbIntersect(r, BVH[node.right].aabbMIN, BVH[node.right].aabbMAX, tminR, tmaxR);
-
-                // If both children were hit, push the farther one first
-                if (hitLeft && hitRight)
-                {
-                    if (tminL < tminR)
-                    {
-                        nodeStack[stackTop++] = node.right; // farther
-                        nodeStack[stackTop++] = node.left;  // nearer
-                    }
-                    else
-                    {
-                        nodeStack[stackTop++] = node.left;  // farther
-                        nodeStack[stackTop++] = node.right; // nearer
-                    }
-                }
-                else if (hitLeft)
-                {
-                    nodeStack[stackTop++] = node.left;
-                }
-                else if (hitRight)
-                {
-                    nodeStack[stackTop++] = node.right;
-                }
-            }
-        }
-    }
-}
-
-__device__ void sceneIntersection(const Ray& r, Vertices* verts, Triangle* scene, int triNum, 
-    Intersection& intersect)
-{
-    intersect.valid = false;
-    float min_t = 3.402823466e+38f;
-    
-    for (int i = 0; i < triNum; i++)
-    {
-        Triangle* tri = &scene[i];
-        float4 barycentric;
-        float t;
-        bool hitTri = triangleIntersect(verts, tri, r, barycentric, t); // returns true if it hits the tri
-        if (hitTri && (t < min_t))
-        {
-            min_t = t; // Update the closest-hit distance
-            intersect.point = r.at(t);
-            intersect.color = verts->colors[tri->aInd] * barycentric.z + 
-                                verts->colors[tri->bInd] * barycentric.x + 
-                                verts->colors[tri->cInd] * barycentric.y;
-            intersect.normal = normalize(verts->normals[tri->naInd] * barycentric.z + 
-                                verts->normals[tri->nbInd] * barycentric.x + 
-                                verts->normals[tri->ncInd] * barycentric.y);
-
-            intersect.uv = verts->uvs[tri->uvaInd] * barycentric.z + 
-                verts->uvs[tri->uvbInd] * barycentric.x + 
-                verts->uvs[tri->uvcInd] * barycentric.y;
-            if (dot(intersect.normal, r.direction) > 0.0f) 
-            {
-                intersect.normal = -intersect.normal;
-                intersect.backface = true;
-            }
-            else 
-            {
-                intersect.backface = false;
-            }
-                
-            intersect.materialID = tri->materialID;
-            intersect.emission = tri->emission;
-            intersect.valid = true;
-            //intersect.tri = *tri; // could be bad for performance
-            intersect.triIDX = i;
-
-            intersect.dist = t;
-        }
-    }
-}
-
-__global__ void initRNG(curandState* states, int width, int height, unsigned long seed)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) return;
-
-    int idx = y * width + x;
-    curand_init(seed, idx, 0, &states[idx]);  
-}
-
 __device__ void neePDF(Vertices* vertices, Triangle* scene, int lightNum, int lightTriInd, const Intersection& intersect, 
     float& light_pdf, float etaI, float etaT, const Intersection* newIntersect)
 {
@@ -412,7 +67,6 @@ __device__ void neePDF(Vertices* vertices, Triangle* scene, int lightNum, int li
     
     light_pdf = distanceSQR / (cosThetaLight * lightNum * area);
 }
-
 
 __device__ void nextEventEstimation(curandState& localState, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, Vertices* vertices,
     Triangle* scene, Triangle* lights, int lightNum, const Intersection& intersect, const float4& wo, 
@@ -485,55 +139,6 @@ __device__ void nextEventEstimation(curandState& localState, Material* materials
     }
 }
 
-__device__ void removeMaterialFromStack(int* stack, int* stackTop, int materialID)
-{
-    int i_found = -1;
-    for (int i = (*stackTop) - 1; i > 0; i--)
-    {
-        if (stack[i] == materialID)
-        {
-            i_found = i;
-            break;
-        }
-    }
-
-    if (i_found != -1)
-    {
-        for (int i = i_found; i < (*stackTop) - 1; i++)
-        {
-            stack[i] = stack[i + 1];
-        }
-        (*stackTop)--;
-    }
-}
-
-__device__ float4 sampleSky(float4 direction)
-{
-    return f4();
-    float4 unit_dir = normalize(direction); 
-
-    float t = 0.5f * (unit_dir.y + 1.0f);
-
-    //float4 c_horizon = 2.2f* f4(1.0f, 0.8f, 0.2f);
-    //float4 c_zenith  = f4(0.4f, 0.4f, 0.8f);
-    float4 c_horizon = 1.0f * f4(1.0f, 0.4f, 0.2f);
-    //float4 c_horizon = 1.0f * f4(1.0f, 1.0f, 0.2f);
-    float4 c_zenith  = f4(0.3f, 0.4f, 0.8f);
-    //float4 c_zenith  = f4(0.9f, 0.9f, 0.2f);
-
-    float4 sky_color = (1.0f - t) * c_horizon + t * c_zenith;
-
-    float4 sun_dir = normalize(f4(-0.45f, 0.05f, 0.866f)); 
-    float sun_focus = 800.0f;
-    float sun_intensity = 15.0f;
-    float4 sun_base = f4(1.0f, 0.8f, 0.2f);
-
-    float sun_factor = pow(max(0.0f, dot(unit_dir, sun_dir)), sun_focus);
-    float4 sun_final = sun_base * sun_intensity * sun_factor;
-
-    return sky_color;
-}
-
 __global__ void Li_naive_unidirectional (curandState* rngStates, Camera camera, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, int maxDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
     Triangle* lights, int lightNum, int numSample, bool useMIS, int w, int h, float4* colors)
 {
@@ -559,15 +164,10 @@ __global__ void Li_naive_unidirectional (curandState* rngStates, Camera camera, 
             break;
         }
 
-        
-
         float4 toSurface_local;
         float4 toNext_local;
         toLocal(r.direction, intersect.normal, toSurface_local);
-        if (isnan(toSurface_local.x) || isnan(toSurface_local.y) || isnan(toSurface_local.z)) {
-            printf("NaN DETECTED ON toSurfaceLocal: (%f, %f, %f) at depth %d\n local: (%f, %f, %f)\n normal: (%f, %f, %f)\n\n", 
-                r.direction.x, r.direction.y, r.direction.z, depth, toSurface_local.x, toSurface_local.y, toSurface_local.z, intersect.normal.x, intersect.normal.y, intersect.normal.z);
-        }
+
         float4 f_val;
         float pdf;
         sample_f_eval(localState, materials, intersect.materialID, textures, toSurface_local, 1.0f, 1.0f, intersect.backface, toNext_local, f_val, pdf, intersect.uv);
@@ -637,8 +237,8 @@ __host__ void launch_naive_unidirectional(int maxDepth, Camera camera, Material*
                         h_colors[i] = f4(0.0f, 1.0f, 0.0f); // Bright Green for Inf
                     }
                     if (h_colors[image.toIndex(i, j)].x < 0 || h_colors[image.toIndex(i, j)].y < 0 || h_colors[image.toIndex(i, j)].z < 0)
-                        cout << i << ", " << j << " Negative color written: <" << h_colors[image.toIndex(i, j)].x << ", " << h_colors[image.toIndex(i, j)].y << ", " 
-                        << h_colors[image.toIndex(i, j)].z << ">"<< endl;
+                        std::cout << i << ", " << j << " Negative color written: <" << h_colors[image.toIndex(i, j)].x << ", " << h_colors[image.toIndex(i, j)].y << ", " 
+                        << h_colors[image.toIndex(i, j)].z << ">"<< std::endl;
                     
                     image.setColor(i, j, h_colors[image.toIndex(i, j)] / (float)(currSample + 1));
                 }
@@ -974,8 +574,8 @@ __host__ void launch_unidirectional(int maxDepth, Camera camera, Material* mater
                         h_colors[i] = f4(0.0f, 1.0f, 0.0f); // Bright Green for Inf
                     }
                     if (h_colors[image.toIndex(i, j)].x < 0 || h_colors[image.toIndex(i, j)].y < 0 || h_colors[image.toIndex(i, j)].z < 0)
-                        cout << i << ", " << j << " Negative color written: <" << h_colors[image.toIndex(i, j)].x << ", " << h_colors[image.toIndex(i, j)].y << ", " 
-                        << h_colors[image.toIndex(i, j)].z << ">"<< endl;
+                        std::cout << i << ", " << j << " Negative color written: <" << h_colors[image.toIndex(i, j)].x << ", " << h_colors[image.toIndex(i, j)].y << ", " 
+                        << h_colors[image.toIndex(i, j)].z << ">"<< std::endl;
                     
                     image.setColor(i, j, h_colors[image.toIndex(i, j)] / (float)(currSample + 1));
                 }
@@ -1259,8 +859,7 @@ __device__ void generateEyePath(curandState& localState, Camera camera, Material
         if (depth == 1) {
             float pdf_connect = 1.0f;
             float pdf_trace = 1.0f;
-            //float numLightSample = (float) w * (float) h;
-            float numLightSample = 1.0f;
+            float numLightSample = (float) w * (float) h;
 
             float vcm = (pdf_connect * numLightSample) / (pdf_trace * pdfFwd_area);
             float vc = 0.0f;
@@ -1796,8 +1395,7 @@ __global__ void lightPathTracing (curandState* rngStates, Camera camera, PathVer
                 // the camera emission pdf of generating the current vertex
                 float pdf_currRev_area = cosAtLight / (distanceSQR * imagePlaneArea * cosAtCamera * cosAtCamera * cosAtCamera);
 
-                //float numLightSample = (float) w * (float) h;
-                float numLightSample = 1.0f;
+                float numLightSample = (float) w * (float) h;
 
                 float pdf_oneBeforePrevRev_SA;
                 pdf_eval(materials, lightPath->materialID[lightPathIDX], textures, -lightToCamera_local, currToPrev_local, etaI, etaT, 
@@ -2207,51 +1805,6 @@ __global__ void Li_bidirectional(curandState* rngStates, Camera camera, PathVert
     rngStates[pixelIdx] = localState;
 }
 
-__global__ void cleanAndFormatImage(
-    float4* accumulationBuffer, // Your raw 'colors' buffer (Sum of samples)
-    float4* overlayBuffer,      // Your 'overlay' buffer
-    float4* outputBuffer,       // A temporary buffer to store the result for saving
-    int w, int h, 
-    int currentSampleCount) 
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int idy = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (idx >= w || idy >= h) return;
-
-    int pixelIndex = idy * w + idx;
-
-    // 1. Read the raw accumulated color
-    float4 acc = accumulationBuffer[pixelIndex];
-    float4 ov = overlayBuffer[pixelIndex];
-    float4 finalColor;
-
-    // 2. Check for NaNs/Infs BEFORE normalization
-    if (isnan(acc.x) || isnan(acc.y) || isnan(acc.z)) {
-        finalColor = f4(1.0f, 0.0f, 1.0f);
-    } 
-    else if (isinf(acc.x) || isinf(acc.y) || isinf(acc.z)) {
-        finalColor = f4(0.0f, 1.0f, 0.0f);
-    } 
-    else if (acc.x < 0 || acc.y < 0 || acc.z < 0) {
-        finalColor = f4(1.0f, 0.0f, 0.0f);
-    } 
-    else {
-        // 3. Normalize (Average the samples)
-        float scale = 1.0f / (float)(currentSampleCount + 1);
-        finalColor = make_float4(acc.x * scale, acc.y * scale, acc.z * scale, 1.0f);
-    }
-
-    // 4. Apply Overlay (if present)
-    // Assuming overlay logic: if overlay is NOT black, it overrides the render
-    if (ov.x != 0.0f || ov.y != 0.0f || ov.z != 0.0f) {
-        finalColor = ov;
-    }
-
-    // 5. Write to the output buffer
-    outputBuffer[pixelIndex] = finalColor;
-}
-
 __host__ void launch_bidirectional(int eyeDepth, int lightDepth, Camera camera, PathVertices* eyePath, PathVertices* lightPath, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
     Triangle* lights, int lightNum, int numSample, int w, int h, float4 sceneCenter, float sceneRadius, float4* colors, float4* overlay, bool postProcess)
 {
@@ -2393,8 +1946,276 @@ __host__ void launch_bidirectional(int eyeDepth, int lightDepth, Camera camera, 
     }
 }
 
-__global__ void doLightPass(curandState* rngStates, Camera camera, VCMPathVertices* lightPath, int* lightPathLengths, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, 
-    int lightDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, Triangle* lights, int lightNum, int numSample, int w, int h, float4 sceneCenter, float sceneRadius, float4* colors, float4* overlay) 
+__device__ void generateVCMLightPath(curandState& localState, int x, int y, int w, int h, VCMPathVertices lightPath, Photons photons, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, 
+    int maxDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, Triangle* lights, int lightNum, float4 sceneCenter, float sceneRadius, 
+    float mergeRadius, float4* overlay, int& pathLength, int* globalPhotonIndex)
+{
+    float eta_vcm = (float)(w * h) * PI * mergeRadius * mergeRadius;
+
+    pathLength = 0;
+
+    // the convention is that light index -1 is the environment, and that lightNum doesnt include the environment
+    int lightInd = SAMPLE_ENVIRONMENT ? (min(static_cast<int>(curand_uniform(&localState) * (lightNum + 1)), lightNum) - 1) : 
+        (min(static_cast<int>(curand_uniform(&localState) * (lightNum)), lightNum - 1)); 
+    
+    float pdf_chooseLight = 1.0f / ((float) (SAMPLE_ENVIRONMENT ? (lightNum + 1) : lightNum));
+
+    Ray r;
+    float prevPDF_solidAngle = -1.0f; // outgoing pdf from scattering functions
+    float prev_cosine = -1.0f; // the previous cosine between the normal and the outgoing ray
+    float4 start_wi = f4();
+
+    float pdf_chooseLightPos = -1.0f;
+    float4 currThroughput = f4();
+
+    float4 y0Pos;
+
+    if (lightInd == -1) {return;}
+    else
+    {
+        Triangle light = lights[lightInd];
+        float4 apos = vertices->positions[light.aInd];
+        float4 bpos = vertices->positions[light.bInd];
+        float4 cpos = vertices->positions[light.cInd];
+
+        float4 anorm = vertices->normals[light.naInd];
+        float4 bnorm = vertices->normals[light.nbInd];
+        float4 cnorm = vertices->normals[light.ncInd];
+
+        float area = 0.5f * length(cross3(bpos - apos, cpos - apos));
+
+        // for depth 1, this is NOT a solid angle PDF, but we are just reusing the varible
+        pdf_chooseLightPos = pdf_chooseLight / area;
+
+        float u = sqrtf(curand_uniform(&localState));
+        float v = curand_uniform(&localState);
+
+        float w0 = (1.0f - u);
+        float w1 = u * (1.0f - v);
+        float w2 = u * v;
+
+        y0Pos = w0 * apos + w1 * bpos + w2 * cpos;
+        float4 y0Norm = normalize(w0 * anorm + w1 * bnorm + w2 * cnorm);
+
+        float4 wo_local;
+        cosine_emit(localState, wo_local, prevPDF_solidAngle);
+        toWorld(wo_local, y0Norm, start_wi);
+
+        r.origin = y0Pos + y0Norm * RAY_EPSILON;
+        r.direction = start_wi;
+
+        currThroughput = light.emission * PI / pdf_chooseLightPos;
+
+        prev_cosine = fabsf(dot(normalize(start_wi), y0Norm));
+    }
+    float4 prevPos = y0Pos;
+
+    float prev_d_vcm = -1.0f;
+    float prev_d_vc = -1.0f;
+    float prev_d_vm = -1.0f;
+
+    float pdf_onebeforePrevRev_SA = -1.0f;
+    bool prevWasDelta = false;
+
+    for (int depth = 0; depth < maxDepth; depth++)
+    {
+        int currIdx = pathBufferIdx(w, h, x, y, depth);
+        int prevIdx = (depth == 0) ? -1 : pathBufferIdx(w, h, x, y, depth-1);
+
+        Intersection intersect = Intersection();
+        BVHSceneIntersect(r, BVH, BVHindices, vertices, scene, intersect);
+
+        if (!intersect.valid)
+        {
+            return;
+        }
+        
+        float2 currUV = intersect.uv;
+        float4 currBeta = currThroughput;
+        float4 currNormal = intersect.normal;
+        int currMatID = intersect.materialID;
+        float4 currPos = intersect.point;
+        
+        bool currDelta = materials[currMatID].isSpecular;
+        bool currBackface = intersect.backface;
+        
+        float4 currWo = normalize(-r.direction);
+
+        float4 wo_world = currPos - prevPos; // the incoming direction, pointing at the new surface
+        float4 wo_local; // the incoming direction to the current path vertex. we use this for the cosine in the pdf conversion
+        toLocal(r.direction, currNormal, wo_local);
+
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // calculate forward pdf (previous vertex to current)
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        float distanceSQR = fmaxf(lengthSquared(wo_world), RAY_EPSILON);
+
+        // previous pdf (solid angle) * abs of dot product of current normal with incoming direction into the current surface divided by distance squared
+        float pdfFwd_area; 
+        pdfFwd_area = prevPDF_solidAngle * fabsf(wo_local.z) / distanceSQR;
+
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // Scatter to next vertex
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        // the NEW pdf forward (curr to next)
+        float pdfFwd_solidAngle;
+        float4 f_val;
+        float4 wi_local; //direction to next vertex
+
+        float etaI = 1.0f; // TEMPORARY, CHANGE AFTER IMPLEMENTING PRIORITY NESTED DIELECTRICS
+        float etaT = 1.0f;
+
+        sample_f_eval(localState, materials, currMatID, textures, wo_local, etaI, etaT, intersect.backface, wi_local, f_val, 
+            pdfFwd_solidAngle, currUV);
+
+        float4 wi_world;
+        toWorld(wi_local, intersect.normal, wi_world);
+
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // Correct for physics
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        // check transmission through current surface
+        bool transmitted = (wi_local.z > 0) != (wo_local.z > 0); 
+        if (materials[currMatID].type == MAT_SMOOTHDIELECTRIC) // If this is refractive
+        {
+
+            if (transmitted) {
+                float correction = (etaT * etaT) / (etaI * etaI);
+                f_val *= correction;
+            }
+        }
+        
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // calculate backwards pdf (current vertex to previous)
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        float4 nextToCurrent_local = -wi_local;
+        float4 currentToPrev_local = -wo_local;
+
+        float pdfRev_solidAngle;
+        pdf_eval(materials, currMatID, textures, nextToCurrent_local, currentToPrev_local, etaI, etaT, 
+            pdfRev_solidAngle, currUV);
+        
+        if (pdfFwd_solidAngle < EPSILON)
+            break;
+
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // Update running values
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        currThroughput = currThroughput * f_val * fabsf(wi_local.z) / pdfFwd_solidAngle;
+
+        float curr_d_vcm = -1.0f;
+        float curr_d_vc = -1.0f;
+        float curr_d_vm = -1.0f;
+
+        if (depth == 0) {
+
+            /*the spatial probability of picking the starting light. This is equal to both
+            the probability of connecting to the light vertex via nee, and also equal to the
+            probability of starting a light path at the light vertex. This value is stored
+            in the forward pdf of the light vertex
+            */
+            float pdf_sampleLight = pdf_chooseLightPos;
+
+            // the pdf of connecting to the previous light via NEE
+            float pdf_connect = pdf_sampleLight;
+
+            // the pdf of starting a light path at the previous light
+            float pdf_trace = pdf_sampleLight;
+
+            // to convert to area density at previous vertex
+            float G = prev_cosine / distanceSQR;
+
+            // pdfFwdArea is the emission pdf of the light, converted to area density at the current vertex
+            curr_d_vcm = (pdf_connect) / (pdf_trace * pdfFwd_area);
+            curr_d_vc = G / (pdf_trace * pdfFwd_area);
+            curr_d_vm = G / (pdf_trace * pdfFwd_area * eta_vcm);
+
+            prev_d_vcm = curr_d_vcm;
+            prev_d_vc = curr_d_vc;
+            prev_d_vm = curr_d_vm;
+            pdf_onebeforePrevRev_SA = pdfRev_solidAngle;
+        }
+        else if (prevWasDelta) 
+        {
+            float G = prev_cosine / distanceSQR; // distance to previous vertex
+            
+            curr_d_vcm = 0.0f;
+            curr_d_vc = (G / pdfFwd_area) * (pdf_onebeforePrevRev_SA * prev_d_vc);
+            curr_d_vm = (G / pdfFwd_area) * (pdf_onebeforePrevRev_SA * prev_d_vm);
+
+            prev_d_vcm = curr_d_vcm;
+            prev_d_vc = curr_d_vc;
+            prev_d_vm = curr_d_vm;
+            pdf_onebeforePrevRev_SA = pdfRev_solidAngle;
+        }
+        else
+        {
+            // to convert to area density at previous vertex
+            float G = prev_cosine / distanceSQR;
+
+            curr_d_vcm = 1.0f / pdfFwd_area;
+            curr_d_vc = (G / pdfFwd_area) * (eta_vcm + prev_d_vcm + pdf_onebeforePrevRev_SA * prev_d_vc);
+            curr_d_vm = (G / pdfFwd_area) * (1.0f + (prev_d_vcm / eta_vcm) + pdf_onebeforePrevRev_SA * prev_d_vm);
+
+            prev_d_vcm = curr_d_vcm;
+            prev_d_vc = curr_d_vc;
+            prev_d_vm = curr_d_vm;
+            pdf_onebeforePrevRev_SA = pdfRev_solidAngle;
+        }
+
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // Save Data. We use set functions because the light path struct is highly optimized for memory footprint and contains a ton of shenanigans
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        // light path data (for connections)
+
+        setPos(lightPath, currIdx, currPos);
+        setNormal(lightPath, currIdx, currNormal);
+        setWo(lightPath, currIdx, currWo);
+        setBeta(lightPath, currIdx, currBeta);
+        setUV(lightPath, currIdx, currUV);
+
+        // the boolean flags and light index and material IDs are all packed into one uint. -2 is a flag to say no light
+        setAllInfo(lightPath, currIdx, currDelta, currBackface, -2, currMatID);
+
+        setD_vcm(lightPath, currIdx, curr_d_vcm);
+        setD_vc(lightPath, currIdx, curr_d_vc);
+        setD_vm(lightPath, currIdx, curr_d_vm);
+
+        // photon data (for merging)
+        int photonInd = atomicAdd(globalPhotonIndex, 1);
+
+        setPos(photons, photonInd, currPos);
+        setWi(photons, photonInd, currWo);
+        setBeta(photons, photonInd, currBeta);
+
+        setD_vcm(photons, photonInd, curr_d_vcm);
+        setD_vc(photons, photonInd, curr_d_vc);
+        setD_vm(photons, photonInd, curr_d_vm);
+
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+        // Set up next interaction
+        //---------------------------------------------------------------------------------------------------------------------------------------------------
+
+        r.origin = transmitted ? (currPos - currNormal * RAY_EPSILON) : (currPos + currNormal * RAY_EPSILON);
+        r.direction = wi_world;
+
+        pathLength++;
+        prevPDF_solidAngle = pdfFwd_solidAngle; // update the prev pdf
+        prev_cosine = fabsf(wi_local.z); // update the prev cosine
+        prevWasDelta = currDelta;
+        prevPos = currPos;
+    }
+}
+
+__global__ void doLightPass(curandState* rngStates, Camera camera, VCMPathVertices lightPath, Photons photons, int* lightPathLengths, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, 
+    int lightDepth, Vertices* vertices, int vertNum, Triangle* scene, int triNum, Triangle* lights, int lightNum, int w, int h, float4 sceneCenter, float sceneRadius, 
+    float mergeRadius, float4* colors, float4* overlay, int* globalPhotonIndex) 
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -2405,15 +2226,20 @@ __global__ void doLightPass(curandState* rngStates, Camera camera, VCMPathVertic
     curandState localState = rngStates[pixelIdx];
 
     int lightPathLength;
-    // generateVCMlightPAth();
+    generateVCMLightPath(localState, x, y, w, h, lightPath, photons, materials, textures, BVH, BVHindices, lightDepth, 
+        vertices, vertNum, scene, triNum, lights, lightNum, sceneCenter, sceneRadius, mergeRadius, overlay, 
+        lightPathLength, globalPhotonIndex);
 
     lightPathLengths[pixelIdx] = lightPathLength;
+
+    // assume equal number of merge and connect vertices
+    float eta_vcm = (float)(w * h) * PI * mergeRadius * mergeRadius;
 
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     // Perform special case of the connection: what if the light ray just connected straight to the camera?
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     
-    for (int s = 1; (s <= lightPathLength) && (BDPT_LIGHTTRACE); s++)
+    for (int s = 2; (s <= lightPathLength) && (BDPT_LIGHTTRACE); s++)
     {
         int lightPathIDX = pathBufferIdx(w, h, x, y, s - 1);
 
@@ -2421,13 +2247,13 @@ __global__ void doLightPass(curandState* rngStates, Camera camera, VCMPathVertic
         int materialID;
         bool lightDelta;
         bool backface;
-        getAllInfo(*lightPath, lightPathIDX, lightDelta, backface, lightInd, materialID);
+        getAllInfo(lightPath, lightPathIDX, lightDelta, backface, lightInd, materialID);
 
-        float4 lightPos = getPos(*lightPath, lightPathIDX);
-        float4 lightNorm = getNormal(*lightPath, lightPathIDX);
+        float4 lightPos = getPos(lightPath, lightPathIDX);
+        float4 lightNorm = getNormal(lightPath, lightPathIDX);
 
-        float2 lightUV = getUV(*lightPath, lightPathIDX);
-        float4 lightBeta = getBeta(*lightPath, lightPathIDX);
+        float2 lightUV = getUV(lightPath, lightPathIDX);
+        float4 lightBeta = getBeta(lightPath, lightPathIDX);
         float2 pixelPos;
         if (!camera.worldToRaster(lightPos, pixelPos))
             continue;
@@ -2459,7 +2285,7 @@ __global__ void doLightPass(curandState* rngStates, Camera camera, VCMPathVertic
             if (cosAtLight <= EPSILON) continue;
 
             float4 lightNormal = lightNorm;
-            float4 currToPrev_world = getWo(*lightPath, lightPathIDX);
+            float4 currToPrev_world = getWo(lightPath, lightPathIDX);
             float4 currToPrev_local;
             toLocal(currToPrev_world, lightNormal, currToPrev_local);
 
@@ -2471,14 +2297,8 @@ __global__ void doLightPass(curandState* rngStates, Camera camera, VCMPathVertic
             //---------------------------------------------------------------------------------------------------------------------------------------------------
 
             float4 light_f;
-            if (s == 1)
-            {
-                light_f = f4(1.0f/PI); // since we initialized beta with a pi factor
-            }
-            else
-            {
-                f_eval(materials, materialID, textures, -currToPrev_local, lightToCamera_local, etaI, etaT, light_f, lightUV);
-            }
+
+            f_eval(materials, materialID, textures, -currToPrev_local, lightToCamera_local, etaI, etaT, light_f, lightUV);
 
             float aspect = (float)w / (float)h;
             float imagePlaneArea = 4.0f * aspect * camera.fovScale * camera.fovScale;
@@ -2495,53 +2315,30 @@ __global__ void doLightPass(curandState* rngStates, Camera camera, VCMPathVertic
             //---------------------------------------------------------------------------------------------------------------------------------------------------
             float misWeight;
             
-            if (s == 1)
-            {
-                float pdf_chooseLight = 1.0f / (SAMPLE_ENVIRONMENT ? (lightNum + 1.0f) : lightNum);
+            // we dont consider randomwalks onto the eye lens
+            float wEye = 0.0f;
 
-                Triangle light = lights[lightInd];
-                float4 apos = vertices->positions[light.aInd];
-                float4 bpos = vertices->positions[light.bInd];
-                float4 cpos = vertices->positions[light.cInd];
+            // the chance to begin a eye path at the eye vertex
+            float pdf_trace = 1.0f;
 
-                float area = 0.5f * length(cross3(bpos - apos, cpos - apos));
+            // the chance to connect a light vertex to the eye vertex
+            float pdf_connect = 1.0f;
 
-                float pdf_sample_y0 = pdf_chooseLight / area;
+            float traceRatio = pdf_trace / pdf_connect;
 
-                float pdf_traceFromCamera = cosAtLight / (distanceSQR * imagePlaneArea * cosAtCamera * cosAtCamera * cosAtCamera);
+            // the camera emission pdf of generating the current vertex
+            float pdf_currRev_area = cosAtLight / (distanceSQR * imagePlaneArea * cosAtCamera * cosAtCamera * cosAtCamera);
 
-                float wLight = pdf_traceFromCamera / pdf_sample_y0;
-    
-                misWeight = 1.0f / (1.0f + wLight);
-            }
-            else
-            {
-                // we dont consider randomwalks onto the eye lens
-                float wEye = 0.0f;
+            float numLightSample = (float) w * (float) h;
 
-                // the chance to begin a eye path at the eye vertex
-                float pdf_trace = 1.0f;
+            float pdf_oneBeforePrevRev_SA;
+            pdf_eval(materials, materialID, textures, -lightToCamera_local, currToPrev_local, etaI, etaT, 
+                    pdf_oneBeforePrevRev_SA, lightUV);
+            
+            float wLight = traceRatio * (pdf_currRev_area / numLightSample) * 
+                (eta_vcm + getD_vcm(lightPath, lightPathIDX) + pdf_oneBeforePrevRev_SA * getD_vc(lightPath, lightPathIDX));
 
-                // the chance to connect a light vertex to the eye vertex
-                float pdf_connect = 1.0f;
-
-                float traceRatio = pdf_trace / pdf_connect;
-
-                // the camera emission pdf of generating the current vertex
-                float pdf_currRev_area = cosAtLight / (distanceSQR * imagePlaneArea * cosAtCamera * cosAtCamera * cosAtCamera);
-
-                //float numLightSample = (float) w * (float) h;
-                float numLightSample = 1.0f;
-
-                float pdf_oneBeforePrevRev_SA;
-                pdf_eval(materials, materialID, textures, -lightToCamera_local, currToPrev_local, etaI, etaT, 
-                        pdf_oneBeforePrevRev_SA, lightUV);
-                
-                float wLight = traceRatio * (pdf_currRev_area / numLightSample) * 
-                    (lightPath->d_vcm[lightPathIDX] + pdf_oneBeforePrevRev_SA * lightPath->d_vc[lightPathIDX]);
-
-                misWeight = 1.0f / (1.0f + wLight + wEye);
-            }
+            misWeight = 1.0f / (1.0f + wLight + wEye);
 
             float4 weightedContribution = contribution * misWeight;
             
@@ -2558,8 +2355,8 @@ __global__ void doLightPass(curandState* rngStates, Camera camera, VCMPathVertic
     rngStates[pixelIdx] = localState;
 }
 
-__host__ void launch_VCM(int eyeDepth, int lightDepth, Camera camera, VCMPathVertices* lightPath, Photons* photons, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
-    Triangle* lights, int lightNum, int numSample, int w, int h, float4 sceneCenter, float sceneRadius, float4* colors, float4* overlay, bool postProcess)
+__host__ void launch_VCM(int eyeDepth, int lightDepth, Camera camera, VCMPathVertices* lightPath, Photons* photons, Photons* photons_sorted, Material* materials, float4* textures, BVHnode* BVH, int* BVHindices, Vertices* vertices, int vertNum, Triangle* scene, int triNum, 
+    Triangle* lights, int lightNum, int numSample, int w, int h, float4 sceneCenter, float sceneRadius, float4 sceneMin, float4* colors, float4* overlay, bool postProcess, float mergeRadiusPower, float initialRadiusMultiplier)
 {
     dim3 blockSize(16, 16);  
     dim3 gridSize((w+15)/16, (h+15)/16);
@@ -2578,6 +2375,35 @@ __host__ void launch_VCM(int eyeDepth, int lightDepth, Camera camera, VCMPathVer
     float4* d_finalOutput;
     cudaMalloc(&d_finalOutput, w * h * sizeof(float4));
 
+    int maxPhotonCount = w * h * lightDepth;
+
+    unsigned int* d_hash_keys_in;
+    unsigned int* d_hash_keys_out;
+    unsigned int* d_indices_in;
+    unsigned int* d_indices_out;
+
+    cudaMalloc(&d_hash_keys_in, maxPhotonCount * sizeof(unsigned int));
+    cudaMalloc(&d_hash_keys_out, maxPhotonCount * sizeof(unsigned int));
+    cudaMalloc(&d_indices_in, maxPhotonCount * sizeof(unsigned int));
+    cudaMalloc(&d_indices_out, maxPhotonCount * sizeof(unsigned int));
+    
+    int hashTableSize = GetNextPrime(maxPhotonCount * 2);
+
+    unsigned int* d_cell_start;
+    unsigned int* d_cell_end;
+
+    cudaMalloc(&d_cell_start, hashTableSize * sizeof(unsigned int));
+    cudaMalloc(&d_cell_end, hashTableSize * sizeof(unsigned int));
+
+    void* d_temp_storage = NULL;
+    size_t temp_storage_bytes = 0;
+    cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
+        d_hash_keys_in, d_hash_keys_out, d_indices_in, d_indices_out, maxPhotonCount);
+    cudaMalloc(&d_temp_storage, temp_storage_bytes);
+
+    int* d_global_photon_counter;
+    cudaMalloc(&d_global_photon_counter, sizeof(int));
+
     size_t freeB, totalB;
     cudaMemGetInfo(&freeB, &totalB);
     printf("Free: %.2f MB of %.2f MB\n",
@@ -2592,8 +2418,51 @@ __host__ void launch_VCM(int eyeDepth, int lightDepth, Camera camera, VCMPathVer
 
     std::cout << "Running Kernels" << std::endl;
     
+    float mergeRadius;
     for (int currSample = 0; currSample < numSample; currSample++)
     {
+        mergeRadius = calculateMergeRadius(sceneRadius * initialRadiusMultiplier, mergeRadiusPower, currSample);
+        cudaMemset(d_global_photon_counter, 0, sizeof(int));
+
+        doLightPass<<<gridSize, blockSize>>>(
+            d_rngStates,
+            camera,
+            *lightPath,
+            *photons,
+            d_pathLengths,
+            materials, textures,
+            BVH, BVHindices,
+            lightDepth,
+            vertices, vertNum,
+            scene, triNum,
+            lights, lightNum,
+            w, h,
+            sceneCenter, sceneRadius, mergeRadius,
+            colors, overlay,
+            d_global_photon_counter
+        );
+
+
+        int photonCount;
+        cudaMemcpy(&photonCount, d_global_photon_counter, sizeof(int), cudaMemcpyDeviceToHost);
+        // run light pass
+        buildHashGrid(
+            photons, 
+            photons_sorted, 
+            photonCount,
+            d_hash_keys_in,
+            d_hash_keys_out,
+            d_indices_in,
+            d_indices_out,
+            d_temp_storage,
+            temp_storage_bytes,
+            d_cell_start,
+            d_cell_end,
+            sceneMin, 
+            mergeRadius, 
+            hashTableSize
+        );
+        // run eye pass (randomwalk plus connections)
         cudaDeviceSynchronize();
         auto now = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastSaveTime).count();
@@ -2627,6 +2496,17 @@ __host__ void launch_VCM(int eyeDepth, int lightDepth, Camera camera, VCMPathVer
     cudaFree(d_pathLengths);
     cudaFree(d_rngStates);
     cudaFree(d_finalOutput);
+
+    cudaFree(d_hash_keys_in);
+    cudaFree(d_hash_keys_out);
+    cudaFree(d_indices_in);
+    cudaFree(d_indices_out);
+
+    cudaFree(d_cell_start);
+    cudaFree(d_cell_end);
+
+    cudaFree(d_temp_storage);
+    cudaFree(d_global_photon_counter);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

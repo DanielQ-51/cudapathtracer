@@ -1,14 +1,12 @@
 #pragma once
 
-#include <cuda_runtime.h>
-#include <math.h>
 #include "util.cuh"
 #include <numeric>
-#include <algorithm>
-#include <curand_kernel.h>
-#include <sstream>
-#include <string>
+#include <iostream>
 #include <fstream>
+#include <string>
+#include <sstream>
+#include <vector>
 #include <cuda_fp16.h>
 
 struct BVHnode
@@ -61,83 +59,93 @@ inline void printBVH(const std::vector<BVHnode>& bvh, const std::vector<int>& in
     if (node.right != -1) printBVH(bvh, indices, level + 1, node.right);
 }
 
-inline void printBVHSummary(const std::vector<BVHnode>& bvh, int nodeIdx = 0, int level = 0,
-                            int& totalNodes = *(new int(0)),
-                            std::vector<int>* leafDepths = nullptr,
-                            std::vector<int>* leafSizes = nullptr)
+inline void traverseBVH(const std::vector<BVHnode>& bvh, int nodeIdx, int level,
+                       int& totalNodes, 
+                       std::vector<int>& leafDepths, 
+                       std::vector<int>& leafSizes) 
 {
-    if (!leafDepths) leafDepths = new std::vector<int>();
-    if (!leafSizes) leafSizes = new std::vector<int>();
-
-    if (nodeIdx >= bvh.size() || nodeIdx < 0) return;
+    if (nodeIdx < 0 || nodeIdx >= (int)bvh.size()) return;
 
     const BVHnode& node = bvh[nodeIdx];
     totalNodes++;
 
-    if (node.left == -1 && node.right == -1) // leaf node
-    {
-        leafDepths->push_back(level);
-        leafSizes->push_back(node.primCount);
+    // Check if it's a leaf node
+    if (node.left == -1 && node.right == -1) {
+        leafDepths.push_back(level);
+        leafSizes.push_back(node.primCount);
+        return; 
     }
 
-    if (node.left != -1)
-        printBVHSummary(bvh, node.left, level + 1, totalNodes, leafDepths, leafSizes);
-    if (node.right != -1)
-        printBVHSummary(bvh, node.right, level + 1, totalNodes, leafDepths, leafSizes);
+    // Recurse into children
+    if (node.left != -1)  traverseBVH(bvh, node.left,  level + 1, totalNodes, leafDepths, leafSizes);
+    if (node.right != -1) traverseBVH(bvh, node.right, level + 1, totalNodes, leafDepths, leafSizes);
+}
 
-    // Only print at the top level
-    if (level == 0)
-    {
-        int leafCount = leafDepths->size();
-        int maxDepth = leafCount > 0 ? *std::max_element(leafDepths->begin(), leafDepths->end()) : 0;
-        int largestLeaf = leafCount > 0 ? *std::max_element(leafSizes->begin(), leafSizes->end()) : 0;
-
-        auto mean = [](const std::vector<int>& v) {
-            return v.empty() ? 0.0 : static_cast<double>(std::accumulate(v.begin(), v.end(), 0LL)) / v.size();
-        };
-
-        auto stddev = [mean](const std::vector<int>& v) {
-            if (v.empty()) return 0.0;
-            double m = mean(v);
-            double sumSq = 0.0;
-            for (int x : v) sumSq += (x - m) * (x - m);
-            return std::sqrt(sumSq / v.size());
-        };
-
-        auto median = [](std::vector<int> v) -> double {
-            if (v.empty()) return 0.0;
-            std::sort(v.begin(), v.end());
-            size_t n = v.size();
-            return n % 2 == 0 ? 0.5 * (v[n/2 - 1] + v[n/2]) : v[n/2];
-        };
-
-        std::cout << "================= BVH Summary =================\n";
-        std::cout << "Total nodes:       " << totalNodes << "\n";
-        std::cout << "Leaf nodes:        " << leafCount << "\n";
-        std::cout << "Max leaf depth:    " << maxDepth << "\n";
-        std::cout << "Average leaf depth:" << mean(*leafDepths) << "\n";
-        std::cout << "Median leaf depth: " << median(*leafDepths) << "\n";
-        std::cout << "Leaf depth stddev: " << stddev(*leafDepths) << "\n";
-        std::cout << "Largest leaf:      " << largestLeaf << " primitives\n";
-        std::cout << "Average leaf size: " << mean(*leafSizes) << " primitives\n";
-        std::cout << "Median leaf size:  " << median(*leafSizes) << " primitives\n";
-        std::cout << "Leaf size stddev:  " << stddev(*leafSizes) << "\n";
-        std::cout << "Internal nodes:    " << (totalNodes - leafCount) << "\n";
-
-        // Print top 10 largest leaf sizes
-        std::vector<int> sortedLeafSizes = *leafSizes;
-        std::sort(sortedLeafSizes.begin(), sortedLeafSizes.end(), std::greater<int>());
-        std::cout << "Top 10 largest leaf sizes: ";
-        for (size_t i = 0; i < std::min<size_t>(10, sortedLeafSizes.size()); ++i)
-            std::cout << sortedLeafSizes[i] << " ";
-        std::cout << "\n";
-
-        std::cout << "===============================================\n";
-
-        delete leafDepths;
-        delete leafSizes;
-        delete &totalNodes;
+inline void printBVHSummary(const std::vector<BVHnode>& bvh) 
+{
+    if (bvh.empty()) {
+        std::cout << "BVH is empty.\n";
+        return;
     }
+
+    // 1. Setup local tracking variables (Allocated on stack, no leaks!)
+    int totalNodes = 0;
+    std::vector<int> leafDepths;
+    std::vector<int> leafSizes;
+
+    // 2. Perform the traversal
+    traverseBVH(bvh, 0, 0, totalNodes, leafDepths, leafSizes);
+
+    // 3. Perform Calculations
+    int leafCount = (int)leafDepths.size();
+    if (leafCount == 0) return;
+
+    int maxDepth = *std::max_element(leafDepths.begin(), leafDepths.end());
+    int largestLeaf = *std::max_element(leafSizes.begin(), leafSizes.end());
+
+    auto mean = [](const std::vector<int>& v) {
+        return v.empty() ? 0.0 : static_cast<double>(std::accumulate(v.begin(), v.end(), 0LL)) / v.size();
+    };
+
+    auto stddev = [mean](const std::vector<int>& v) {
+        if (v.empty()) return 0.0;
+        double m = mean(v);
+        double sumSq = 0.0;
+        for (int x : v) sumSq += (x - m) * (x - m);
+        return std::sqrt(sumSq / v.size());
+    };
+
+    auto median = [](std::vector<int> v) -> double {
+        if (v.empty()) return 0.0;
+        std::sort(v.begin(), v.end());
+        size_t n = v.size();
+        return n % 2 == 0 ? 0.5 * (v[n/2 - 1] + v[n/2]) : (double)v[n/2];
+    };
+
+    // 4. Print Summary
+    std::cout << "\n================= BVH Summary =================\n";
+    std::cout << "Total nodes:       " << totalNodes << "\n";
+    std::cout << "Leaf nodes:        " << leafCount << "\n";
+    std::cout << "Internal nodes:    " << (totalNodes - leafCount) << "\n";
+    std::cout << "-----------------------------------------------\n";
+    std::cout << "Max leaf depth:    " << maxDepth << "\n";
+    std::cout << "Average depth:     " << mean(leafDepths) << "\n";
+    std::cout << "Median depth:      " << median(leafDepths) << "\n";
+    std::cout << "Depth stddev:      " << stddev(leafDepths) << "\n";
+    std::cout << "-----------------------------------------------\n";
+    std::cout << "Largest leaf:      " << largestLeaf << " primitives\n";
+    std::cout << "Average leaf size: " << mean(leafSizes) << " primitives\n";
+    std::cout << "Median leaf size:  " << median(leafSizes) << " primitives\n";
+    std::cout << "Leaf size stddev:  " << stddev(leafSizes) << "\n";
+
+    // Print top 10 largest leaf sizes
+    std::vector<int> sortedLeafSizes = leafSizes;
+    std::sort(sortedLeafSizes.begin(), sortedLeafSizes.end(), std::greater<int>());
+    std::cout << "Top 10 largest:    ";
+    for (size_t i = 0; i < std::min<size_t>(10, sortedLeafSizes.size()); ++i)
+        std::cout << sortedLeafSizes[i] << " ";
+    
+    std::cout << "\n===============================================\n\n";
 }
 
 struct Vertices
@@ -809,6 +817,9 @@ struct RenderConfig {
     bool bdptDoMis = false;
     bool bdptPaintWeight = false;
 
+    float vcmMergeConst = 0.0f;
+    float vcmInitialMergeRadiusMultiplier = 0.0f;
+
     // Camera
     bool pinholeCamera = false;
     float4 camPos;
@@ -914,6 +925,8 @@ __host__ inline bool loadConfig(const std::string& filepath, RenderConfig& confi
             else if (key == "Camera FOV") config.camFov = std::stof(value);
             else if (key == "Camera Apeture") config.camApeture = std::stof(value);
             else if (key == "Camera FocalDist:") config.camFocalDist = std::stof(value);
+            else if (key == "VCM Merge Radius Power Factor:") config.vcmMergeConst = std::stof(value);
+            else if (key == "VCM Initial Merge Radius Multipler:") config.vcmInitialMergeRadiusMultiplier = std::stof(value);
         }
     }
     return true;
@@ -921,8 +934,13 @@ __host__ inline bool loadConfig(const std::string& filepath, RenderConfig& confi
 
 #define MASK_DELTA      (0x1)
 #define MASK_BACKFACE   (0x2)
-#define MASK_LIGHT      (0xFFFFC)      // 20 bits shifted by 2
-#define MASK_MAT        (0xFFC00000)
+
+#define MASK_LIGHT      0xFFFFFu // 20 bits
+#define MASK_MAT        0x3FFu   // 10 bits
+
+// The raw unsigned values stored in the bitfield
+#define RAW_LIGHT_ENV  0xFFFFFu // Maps to -1
+#define RAW_LIGHT_NONE   0xFFFFEu // Maps to -2
 
 /*
 A highly optimized data structure to acommodate for the large spatial complexity of VCM. Please hire me
@@ -949,10 +967,10 @@ struct VCMPathVertices
     half2* packedUV;
 
     /*
-    bit 1: isDelta
-    bit 2: backface
-    bit 3-22: light index
-    bit 23-32: material ID
+    bit 0: isDelta
+    bit 1: backface
+    bit 2-21: light index
+    bit 22-31: material ID
     */
     unsigned int* packedInfo;
     
@@ -961,13 +979,17 @@ struct VCMPathVertices
     float* d_vcm;
 };
 
-__device__ __forceinline__ void setAllInfo (VCMPathVertices& x, int idx, bool isDelta, bool isBackface, int lightID, int matID) 
+__device__ __forceinline__ void setAllInfo(VCMPathVertices& x, int idx, bool isDelta, bool isBackface, int lightID, int matID) 
 {
     unsigned int info = 0;
     info |= (isDelta ? 1u : 0u);
     info |= (isBackface ? 1u : 0u) << 1;
-    info |= (unsigned int)(lightID & 0xFFFFF) << 2;
-    info |= (unsigned int)(matID & 0x3FF) << 22;
+    
+    // (-1 & MASK) becomes 0xFFFFF automatically
+    // (-2 & MASK) becomes 0xFFFFE automatically
+    info |= (unsigned int)(lightID & MASK_LIGHT) << 2; 
+    
+    info |= (unsigned int)(matID & MASK_MAT) << 22;
     x.packedInfo[idx] = info;
 }
 
@@ -988,11 +1010,53 @@ __device__ __forceinline__ void getAllInfo(
     // Bit 1: isBackface
     isBackface = (info >> 1) & 1u;
 
-    // Bits 2-21: lightID (20 bits) -> Mask 0xFFFFF
-    lightID = (info >> 2) & 0xFFFFFu;
+    // Bits 2-21: lightID (20 bits)
+    unsigned int rawLight = (info >> 2) & MASK_LIGHT;
+    
+    // Decode special flags
+    if (rawLight == RAW_LIGHT_NONE) {
+        lightID = -1;
+    } else if (rawLight == RAW_LIGHT_ENV) {
+        lightID = -2;
+    } else {
+        lightID = (int)rawLight;
+    }
 
-    // Bits 22-31: matID (10 bits) -> Mask 0x3FF
-    matID = (info >> 22) & 0x3FFu;
+    // Bits 22-31: matID (10 bits)
+    matID = (info >> 22) & MASK_MAT;
+}
+
+__device__ __forceinline__ int getLightIndex(const VCMPathVertices& x, int idx) {
+    unsigned int rawLight = (x.packedInfo[idx] >> 2) & MASK_LIGHT;
+
+    if (rawLight == RAW_LIGHT_NONE) return -1;
+    if (rawLight == RAW_LIGHT_ENV)  return -2;
+    return (int)rawLight;
+}
+
+__device__ __forceinline__ void setLightIndex(VCMPathVertices& x, int idx, int val) {
+    unsigned int current = x.packedInfo[idx];
+    
+    // Clear the current light bits (Bits 2-21)
+    // ~(0xFFFFF << 2) 
+    current &= ~(MASK_LIGHT << 2); 
+    
+    // Apply new value (implicitly handles -1/-2 via masking)
+    current |= (unsigned int)(val & MASK_LIGHT) << 2;
+    
+    x.packedInfo[idx] = current;
+}
+
+__device__ __forceinline__ int getMaterialID(const VCMPathVertices& x, int idx) {
+    return (x.packedInfo[idx] >> 22) & MASK_MAT;
+}
+
+__device__ __forceinline__ void setMaterialID(VCMPathVertices& x, int idx, int val) {
+    unsigned int current = x.packedInfo[idx];
+    current &= ~(MASK_MAT << 22); 
+    
+    current |= (unsigned int)(val & MASK_MAT) << 22;
+    x.packedInfo[idx] = current;
 }
 
 __device__ __forceinline__ bool getIsDelta(const VCMPathVertices& x, int idx) {
@@ -1001,14 +1065,6 @@ __device__ __forceinline__ bool getIsDelta(const VCMPathVertices& x, int idx) {
 
 __device__ __forceinline__ bool getIsBackface(const VCMPathVertices& x, int idx) {
     return (x.packedInfo[idx] >> 1) & 1u;
-}
-
-__device__ __forceinline__ int getLightIndex(const VCMPathVertices& x, int idx) {
-    return (x.packedInfo[idx] >> 2) & 0xFFFFF;
-}
-
-__device__ __forceinline__ int getMaterialID(const VCMPathVertices& x, int idx) {
-    return (x.packedInfo[idx] >> 22) & 0x3FF;
 }
 
 __device__ __forceinline__ void setIsDelta(VCMPathVertices& x, int idx, bool val) {
@@ -1022,20 +1078,6 @@ __device__ __forceinline__ void setIsBackface(VCMPathVertices& x, int idx, bool 
     unsigned int current = x.packedInfo[idx];
     current &= ~MASK_BACKFACE;
     current |= (val ? 1u : 0u) << 1;
-    x.packedInfo[idx] = current;
-}
-
-__device__ __forceinline__ void setLightIndex(VCMPathVertices& x, int idx, int val) {
-    unsigned int current = x.packedInfo[idx];
-    current &= ~MASK_LIGHT; // Clear 20 bits
-    current |= (unsigned int)(val & 0xFFFFF) << 2;
-    x.packedInfo[idx] = current;
-}
-
-__device__ __forceinline__ void setMaterialID(VCMPathVertices& x, int idx, int val) {
-    unsigned int current = x.packedInfo[idx];
-    current &= ~MASK_MAT; // Clear 10 bits
-    current |= (unsigned int)(val & 0x3FF) << 22;
     x.packedInfo[idx] = current;
 }
 
@@ -1106,6 +1148,7 @@ __device__ __forceinline__ float getD_vcm(const VCMPathVertices& x, int idx) {
 __device__ __forceinline__ void setD_vcm(VCMPathVertices& x, int idx, float val) {
     x.d_vcm[idx] = val;
 }
+
 /*
 Struct containing photon data for vcm.
 */
@@ -1115,6 +1158,7 @@ struct Photons
     float* pos_y;
     float* pos_z;
 
+    // current to previous
     unsigned int* packedWi;
 
     unsigned int* packedPower;

@@ -1,9 +1,7 @@
 #pragma once
-#include <vector>
-#include <string>
-#include <algorithm>
-#include <cuda_runtime.h>
 
+#include "util.cuh"
+#include <vector>
 
 class Image 
 {

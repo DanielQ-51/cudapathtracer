@@ -4,16 +4,18 @@ Handles the image writing.
 Uses a 1d vector of pixels instead of 2d for minor optimization.
 
 */
-#pragma once
-#include <cuda_runtime.h>
-#include "imageUtil.cuh"
-#include "util.cuh"
+
+#include <cstdint>
+#include <utility>
+#include <fstream>
 #include <vector>
 #include <string>
-#include <fstream>
-#include <algorithm>
 #include <iostream>
 #include <iomanip>
+
+#include "imageUtil.cuh"
+#include "util.cuh"
+
 
 #pragma pack(push, 1)
 struct BMPFileHeader {

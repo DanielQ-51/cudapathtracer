@@ -1,16 +1,15 @@
 
-#include "imageUtil.cuh"
-#include "util.cuh"
 #include "deviceCode.cuh"
 #include "objects.cuh"
-#include <cuda_runtime.h>
-#include <iostream>
-#include <fstream>
-#include <sstream>
+#include "util.cuh"
 #include <vector>
 #include <chrono>
+#include <iostream>
 #include <set>
-#include <iomanip>  
+#include <iomanip>
+#include "imageUtil.cuh"
+#include <fstream>
+#include <cuda_fp16.h>
 
 using namespace std;
 
@@ -262,6 +261,8 @@ int initRender(string configPath, int renderNumber)
     int lightPathDepth = config.bdptLightDepth;
     
     int maxLeafSize = config.bvhLeafSize;
+    float VCMMergeConstant = config.vcmMergeConst;
+    float VCMInitialMergeRadiusMultiplier = config.vcmInitialMergeRadiusMultiplier;
 
     Camera camera;
     if (config.pinholeCamera)
@@ -500,6 +501,7 @@ int initRender(string configPath, int renderNumber)
     BVHnode root = bvhvec[0];
     float4 sceneCenter = (root.aabbMAX + root.aabbMIN) * 0.5f;
     float sceneRadius = length(root.aabbMAX - sceneCenter) + 0.01f;
+    float4 sceneMin = root.aabbMIN;
 
     cout << "BVH built. Scene radius is " << sceneRadius << "." << endl;
     cout << "Largest leaf is size: " << failcount << "." << " Backup was called "<< backupCt << " times." << endl;
@@ -678,7 +680,7 @@ int initRender(string configPath, int renderNumber)
 
         cudaMemcpy(lightPath_d, &tempPaths, sizeof(VCMPathVertices), cudaMemcpyHostToDevice);
         
-        int totalPhotons = w * h * (lightPathDepth - 1); // light vertex not stored
+        int totalPhotons = w * h * lightPathDepth;
 
         Photons* photons_d;
         cudaMalloc(&photons_d, sizeof(Photons));
@@ -703,6 +705,30 @@ int initRender(string configPath, int renderNumber)
         cudaMemset(tempPhotons.d_vm, 0, sizeof(float) * totalPhotons);
 
         cudaMemcpy(photons_d, &tempPhotons, sizeof(Photons), cudaMemcpyHostToDevice);
+
+        Photons* photons_sorted_d;
+        cudaMalloc(&photons_sorted_d, sizeof(Photons));
+
+        Photons tempPhotons1;
+        cudaMalloc(&tempPhotons1.pos_x, sizeof(float) * totalPhotons);
+        cudaMalloc(&tempPhotons1.pos_y, sizeof(float) * totalPhotons);
+        cudaMalloc(&tempPhotons1.pos_z, sizeof(float) * totalPhotons);
+        cudaMalloc(&tempPhotons1.packedWi, sizeof(unsigned int) * totalPhotons);
+        cudaMalloc(&tempPhotons1.packedPower, sizeof(unsigned int) * totalPhotons);
+        cudaMalloc(&tempPhotons1.d_vc, sizeof(float) * totalPhotons);
+        cudaMalloc(&tempPhotons1.d_vcm, sizeof(float) * totalPhotons);
+        cudaMalloc(&tempPhotons1.d_vm, sizeof(float) * totalPhotons);
+
+        cudaMemset(tempPhotons1.pos_x, 0, sizeof(float) * totalPhotons);
+        cudaMemset(tempPhotons1.pos_y, 0, sizeof(float) * totalPhotons);
+        cudaMemset(tempPhotons1.pos_z, 0, sizeof(float) * totalPhotons);
+        cudaMemset(tempPhotons1.packedWi, 0, sizeof(unsigned int) * totalPhotons);
+        cudaMemset(tempPhotons1.packedPower, 0, sizeof(unsigned int) * totalPhotons);
+        cudaMemset(tempPhotons1.d_vc, 0, sizeof(float) * totalPhotons);
+        cudaMemset(tempPhotons1.d_vcm, 0, sizeof(float) * totalPhotons);
+        cudaMemset(tempPhotons1.d_vm, 0, sizeof(float) * totalPhotons);
+
+        cudaMemcpy(photons_sorted_d, &tempPhotons1, sizeof(Photons), cudaMemcpyHostToDevice);
         
 
         // launch kernel
@@ -731,6 +757,17 @@ int initRender(string configPath, int renderNumber)
         cudaFree(tempPhotons.d_vcm);
         cudaFree(tempPhotons.d_vc);
         cudaFree(tempPhotons.d_vm);
+
+        cudaFree(photons_sorted_d);
+        
+        cudaFree(tempPhotons1.pos_x);
+        cudaFree(tempPhotons1.pos_y);
+        cudaFree(tempPhotons1.pos_z);
+        cudaFree(tempPhotons1.packedPower);
+        cudaFree(tempPhotons1.packedWi);
+        cudaFree(tempPhotons1.d_vcm);
+        cudaFree(tempPhotons1.d_vc);
+        cudaFree(tempPhotons1.d_vm);
     }
     
 

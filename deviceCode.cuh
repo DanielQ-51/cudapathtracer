@@ -1,6 +1,5 @@
-#include <cuda_runtime.h>
-#include <cuda.h>
-#include "util.cuh"
+#pragma once
+
 #include "objects.cuh"
 
 //__global__ void colorPixel (int w, int h, float4* colors);

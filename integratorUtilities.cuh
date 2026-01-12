@@ -1,0 +1,553 @@
+#pragma once
+
+#include "reflectors.cuh"
+#include <cub/cub.cuh>
+
+__device__ inline bool triangleIntersect(Vertices* verts, Triangle* tri, const Ray& r, float4& barycentric, float& tval)
+{
+    float4 tria = verts->positions[tri->aInd];
+    float4 trib = verts->positions[tri->bInd];
+    float4 tric = verts->positions[tri->cInd];
+    float4 e1 = trib - tria;
+    float4 e2 = tric - tria;
+
+    float4 h = cross3(r.direction, e2);
+    float a = dot(h, e1);
+
+    if (fabsf(a) < 1e-12f) 
+        return false;
+    
+    float f = 1.0/a;
+
+    float4 s = r.origin-tria;
+    float u = f * dot(s, h);
+    float4 q = cross3(s, e1);
+    float v = f * dot(r.direction, q);
+    float t = f * dot(e2, q);
+
+
+    if (((u >= 0) && (v >= 0) && (u + v <= 1)) && t > 0.0f)
+    {
+        barycentric = f4(u, v, 1.0f-u-v);
+        tval = t;
+        return true;
+    }
+    else
+    {
+        barycentric = f4();
+        return false;
+    }
+}
+
+__device__ inline bool aabbIntersect(const Ray& r, float4 minCorner, float4 maxCorner, float& tmin, float& tmax)
+{
+    tmin = -1e30f; // initialize to -infinity
+    tmax = 1e30f;  // initialize to +infinity
+
+    // Compute inverse ray direction once
+    float4 invDir = make_float4(
+        1.0f / r.direction.x,
+        1.0f / r.direction.y,
+        1.0f / r.direction.z,
+        0.0f
+    );
+
+    // X axis
+    float tx1 = (minCorner.x - r.origin.x) * invDir.x;
+    float tx2 = (maxCorner.x - r.origin.x) * invDir.x;
+    float tx_min = fminf(tx1, tx2);
+    float tx_max = fmaxf(tx1, tx2);
+    tmin = fmaxf(tmin, tx_min);
+    tmax = fminf(tmax, tx_max);
+
+    // Y axis
+    float ty1 = (minCorner.y - r.origin.y) * invDir.y;
+    float ty2 = (maxCorner.y - r.origin.y) * invDir.y;
+    float ty_min = fminf(ty1, ty2);
+    float ty_max = fmaxf(ty1, ty2);
+    tmin = fmaxf(tmin, ty_min);
+    tmax = fminf(tmax, ty_max);
+
+    // Z axis
+    float tz1 = (minCorner.z - r.origin.z) * invDir.z;
+    float tz2 = (maxCorner.z - r.origin.z) * invDir.z;
+    float tz_min = fminf(tz1, tz2);
+    float tz_max = fmaxf(tz1, tz2);
+    tmin = fmaxf(tmin, tz_min);
+    tmax = fminf(tmax, tz_max);
+    
+    return (tmax >= tmin) && (tmax > 0.0f);
+}
+
+__device__ inline void BVHSceneIntersect(const Ray& r, BVHnode* BVH, int* BVHindices, Vertices* verts, Triangle* scene, Intersection& intersect, float max_t = 999999.0f, int skipTri = -1)
+{
+    intersect.valid = false;
+    float min_t = 3.402823466e+38f;
+
+    int nodeStack[128];
+    int stackTop = 0;
+    nodeStack[stackTop++] = 0; // Push the root node (index 0)
+
+    while (stackTop > 0)
+    {
+        // Pop the next node to check
+        int currentIndex = nodeStack[--stackTop];
+        BVHnode& node = BVH[currentIndex];
+
+        // 2. If it's a leaf node, check its triangles
+        if (node.primCount > 0)
+        {
+            for (int i = node.first; i < node.primCount + node.first; i++)
+            {
+                int idx = BVHindices[i];
+                if (idx == skipTri) continue;
+                Triangle* tri = &scene[idx];
+                float4 barycentric;
+                float t;
+                bool hitTri = triangleIntersect(verts, tri, r, barycentric, t);
+
+                if (hitTri && (t < min_t) && (t < max_t))
+                {
+                    min_t = t; // Update the closest-hit distance
+                    intersect.point = r.at(t);
+                    intersect.color = verts->colors[tri->aInd] * barycentric.z + 
+                                        verts->colors[tri->bInd] * barycentric.x + 
+                                        verts->colors[tri->cInd] * barycentric.y;
+                    intersect.normal = normalize(verts->normals[tri->naInd] * barycentric.z + 
+                                        verts->normals[tri->nbInd] * barycentric.x + 
+                                        verts->normals[tri->ncInd] * barycentric.y);
+
+                    intersect.uv = verts->uvs[tri->uvaInd] * barycentric.z + 
+                        verts->uvs[tri->uvbInd] * barycentric.x + 
+                        verts->uvs[tri->uvcInd] * barycentric.y;
+                    if (dot(intersect.normal, r.direction) > 0.0f) 
+                    {
+                        intersect.normal = -intersect.normal;
+                        intersect.backface = true;
+                    }
+                    else 
+                    {
+                        intersect.backface = false;
+                    }
+                        
+                    intersect.materialID = tri->materialID;
+                    intersect.emission = tri->emission;
+                    intersect.valid = true;
+                    //intersect.tri = *tri; // could be bad for performance
+                    intersect.triIDX = idx;
+
+                    intersect.dist = t;
+                }
+            }
+        }
+        // 3. If it's an internal node, push its children onto the stack
+        else
+        {
+            if (node.left >= 0 || node.right >= 0)
+            {
+                float tminL, tmaxL, tminR, tmaxR;
+                bool hitLeft = false, hitRight = false;
+
+                // Test left child if it exists
+                if (node.left >= 0)
+                    hitLeft = aabbIntersect(r, BVH[node.left].aabbMIN, BVH[node.left].aabbMAX, tminL, tmaxL);
+
+                // Test right child if it exists
+                if (node.right >= 0)
+                    hitRight = aabbIntersect(r, BVH[node.right].aabbMIN, BVH[node.right].aabbMAX, tminR, tmaxR);
+
+                // If both children were hit, push the farther one first
+                if (hitLeft && hitRight)
+                {
+                    if (tminL < tminR)
+                    {
+                        nodeStack[stackTop++] = node.right; // farther
+                        nodeStack[stackTop++] = node.left;  // nearer
+                    }
+                    else
+                    {
+                        nodeStack[stackTop++] = node.left;  // farther
+                        nodeStack[stackTop++] = node.right; // nearer
+                    }
+                }
+                else if (hitLeft)
+                {
+                    nodeStack[stackTop++] = node.left;
+                }
+                else if (hitRight)
+                {
+                    nodeStack[stackTop++] = node.right;
+                }
+            }
+        }
+    }
+}
+
+__device__ inline void BVHShadowRay(const Ray& r, BVHnode* BVH, int* BVHindices, Vertices* verts, Triangle* scene, Material* materials, float4& throughputScale, float max_t, int skip_tri)
+{
+    int nodeStack[128];
+    int stackTop = 0;
+    nodeStack[stackTop++] = 0; // Push the root node (index 0)
+
+    throughputScale = f4(1.0f);
+    while (stackTop > 0)
+    {
+        // Pop the next node to check
+        int currentIndex = nodeStack[--stackTop];
+        BVHnode& node = BVH[currentIndex];
+
+        // 2. If it's a leaf node, check its triangles
+        if (node.primCount > 0)
+        {
+            for (int i = node.first; i < node.primCount + node.first; i++)
+            {
+                int idx = BVHindices[i];
+                Triangle* tri = &scene[idx];
+                float4 barycentric;
+                float t;
+                bool hitTri = triangleIntersect(verts, tri, r, barycentric, t);
+
+                if (idx == skip_tri)
+                    continue;
+
+                if (hitTri && (t < max_t))
+                {
+                    int matID = tri->materialID;
+                    if (materials[matID].type == MAT_LEAF)
+                    {
+                        // 1. We hit a leaf. Don't stop. Just darken the ray.
+                        float4 transColor = materials[matID].albedo;
+                        float transmission = materials[matID].transmission;
+                        
+                        float4 n = verts->normals[tri->naInd] * barycentric.z + 
+                        verts->normals[tri->nbInd] * barycentric.x + 
+                        verts->normals[tri->ncInd] * barycentric.y;
+                        
+                        float cosTheta = fabsf(dot(r.direction, normalize(n)));
+                        
+                        float F = schlick_fresnel(cosTheta, 1.0f, materials[matID].ior);
+                        
+                        throughputScale *= transColor * transmission * (1.0f - F);
+
+                        if (fmaxf(throughputScale.x, fmaxf(throughputScale.y, throughputScale.z)) < 0.01f) 
+                        {
+                            throughputScale = f4(0.0f);
+                            return;
+                        }
+                    }
+                    else 
+                    {
+                        throughputScale = f4(0.0f);
+                        return;
+                    }
+                }
+            }
+        }
+        else
+        {
+            if (node.left >= 0 || node.right >= 0)
+            {
+                float tminL, tmaxL, tminR, tmaxR;
+                bool hitLeft = false, hitRight = false;
+
+                // Test left child if it exists
+                if (node.left >= 0)
+                    hitLeft = aabbIntersect(r, BVH[node.left].aabbMIN, BVH[node.left].aabbMAX, tminL, tmaxL);
+
+                // Test right child if it exists
+                if (node.right >= 0)
+                    hitRight = aabbIntersect(r, BVH[node.right].aabbMIN, BVH[node.right].aabbMAX, tminR, tmaxR);
+
+                // If both children were hit, push the farther one first
+                if (hitLeft && hitRight)
+                {
+                    if (tminL < tminR)
+                    {
+                        nodeStack[stackTop++] = node.right; // farther
+                        nodeStack[stackTop++] = node.left;  // nearer
+                    }
+                    else
+                    {
+                        nodeStack[stackTop++] = node.left;  // farther
+                        nodeStack[stackTop++] = node.right; // nearer
+                    }
+                }
+                else if (hitLeft)
+                {
+                    nodeStack[stackTop++] = node.left;
+                }
+                else if (hitRight)
+                {
+                    nodeStack[stackTop++] = node.right;
+                }
+            }
+        }
+    }
+}
+
+__device__ inline void sceneIntersection(const Ray& r, Vertices* verts, Triangle* scene, int triNum, 
+    Intersection& intersect)
+{
+    intersect.valid = false;
+    float min_t = 3.402823466e+38f;
+    
+    for (int i = 0; i < triNum; i++)
+    {
+        Triangle* tri = &scene[i];
+        float4 barycentric;
+        float t;
+        bool hitTri = triangleIntersect(verts, tri, r, barycentric, t); // returns true if it hits the tri
+        if (hitTri && (t < min_t))
+        {
+            min_t = t; // Update the closest-hit distance
+            intersect.point = r.at(t);
+            intersect.color = verts->colors[tri->aInd] * barycentric.z + 
+                                verts->colors[tri->bInd] * barycentric.x + 
+                                verts->colors[tri->cInd] * barycentric.y;
+            intersect.normal = normalize(verts->normals[tri->naInd] * barycentric.z + 
+                                verts->normals[tri->nbInd] * barycentric.x + 
+                                verts->normals[tri->ncInd] * barycentric.y);
+
+            intersect.uv = verts->uvs[tri->uvaInd] * barycentric.z + 
+                verts->uvs[tri->uvbInd] * barycentric.x + 
+                verts->uvs[tri->uvcInd] * barycentric.y;
+            if (dot(intersect.normal, r.direction) > 0.0f) 
+            {
+                intersect.normal = -intersect.normal;
+                intersect.backface = true;
+            }
+            else 
+            {
+                intersect.backface = false;
+            }
+                
+            intersect.materialID = tri->materialID;
+            intersect.emission = tri->emission;
+            intersect.valid = true;
+            //intersect.tri = *tri; // could be bad for performance
+            intersect.triIDX = i;
+
+            intersect.dist = t;
+        }
+    }
+}
+
+__global__ void cleanAndFormatImage(
+    float4* accumulationBuffer, // Your raw 'colors' buffer (Sum of samples)
+    float4* overlayBuffer,      // Your 'overlay' buffer
+    float4* outputBuffer,       // A temporary buffer to store the result for saving
+    int w, int h, 
+    int currentSampleCount) 
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idy = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (idx >= w || idy >= h) return;
+
+    int pixelIndex = idy * w + idx;
+
+    // 1. Read the raw accumulated color
+    float4 acc = accumulationBuffer[pixelIndex];
+    float4 ov = overlayBuffer[pixelIndex];
+    float4 finalColor;
+
+    // 2. Check for NaNs/Infs BEFORE normalization
+    if (isnan(acc.x) || isnan(acc.y) || isnan(acc.z)) {
+        finalColor = f4(1.0f, 0.0f, 1.0f);
+    } 
+    else if (isinf(acc.x) || isinf(acc.y) || isinf(acc.z)) {
+        finalColor = f4(0.0f, 1.0f, 0.0f);
+    } 
+    else if (acc.x < 0 || acc.y < 0 || acc.z < 0) {
+        finalColor = f4(1.0f, 0.0f, 0.0f);
+    } 
+    else {
+        // 3. Normalize (Average the samples)
+        float scale = 1.0f / (float)(currentSampleCount + 1);
+        finalColor = make_float4(acc.x * scale, acc.y * scale, acc.z * scale, 1.0f);
+    }
+
+    // 4. Apply Overlay (if present)
+    // Assuming overlay logic: if overlay is NOT black, it overrides the render
+    if (ov.x != 0.0f || ov.y != 0.0f || ov.z != 0.0f) {
+        finalColor = ov;
+    }
+
+    // 5. Write to the output buffer
+    outputBuffer[pixelIndex] = finalColor;
+}
+
+__global__ void computeHashes(
+    Photons photons, 
+    int photonCount, 
+    unsigned int* d_hash_keys, 
+    unsigned int* d_indices, 
+    float4 sceneMin, 
+    float mergeRadius, 
+    int hashTableSize
+)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= photonCount) return;
+
+    float4 p = getPos(photons, i);
+
+    d_hash_keys[i] = ComputeGridHash(p, sceneMin, mergeRadius, hashTableSize);
+    d_indices[i] = i;
+}
+
+__global__ void reorderPhotons(
+    Photons photons, 
+    Photons photons_sorted, 
+    int photonCount,
+    unsigned int* d_indices_out
+)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= photonCount) return;
+
+    int src = d_indices_out[i];
+
+    /*
+    It is not neccesary to unpack the values, we just copy them over directly
+    */
+    photons_sorted.pos_x[i] = photons.pos_x[src];
+    photons_sorted.pos_y[i] = photons.pos_y[src];
+    photons_sorted.pos_z[i] = photons.pos_z[src];
+    photons_sorted.packedPower[i] = photons.packedPower[src];
+    photons_sorted.packedWi[i] = photons.packedWi[src];
+    photons_sorted.d_vc[i] = photons.d_vc[src];
+    photons_sorted.d_vcm[i] = photons.d_vcm[src];
+    photons_sorted.d_vm[i] = photons.d_vm[src];
+}
+
+__global__ void buildTable(
+    unsigned int* d_hashes_sorted,
+    unsigned int* d_cell_start,
+    unsigned int* d_cell_end,
+    int numPhotons
+)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numPhotons) return;
+
+    unsigned int hash = d_hashes_sorted[i];
+
+    if (i == 0 || d_hashes_sorted[i - 1] != hash) {
+        d_cell_start[hash] = i; 
+    }
+
+    if (i == numPhotons - 1 || d_hashes_sorted[i + 1] != hash) {
+        d_cell_end[hash] = i + 1;
+    }
+}
+
+__host__ inline void buildHashGrid(
+    Photons* photons, 
+    Photons* photons_sorted, 
+    int photonCount,
+    unsigned int* d_hash_keys_in,
+    unsigned int* d_hash_keys_out,
+    unsigned int* d_indices_in,
+    unsigned int* d_indices_out,
+    void* d_temp_storage,
+    size_t temp_storage_bytes,
+    unsigned int* d_cell_start,
+    unsigned int* d_cell_end,
+    float4 sceneMin, 
+    float mergeRadius, 
+    int hashTableSize
+)
+{
+    int blockSize = 256;
+    int numBlocks = (photonCount + blockSize - 1) / blockSize;
+
+    computeHashes<<<numBlocks, blockSize>>>(
+        *photons,
+        photonCount,
+        d_hash_keys_in,
+        d_indices_in,
+        sceneMin,
+        mergeRadius,
+        hashTableSize
+    );
+
+    cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
+        d_hash_keys_in, d_hash_keys_out, d_indices_in, d_indices_out, photonCount);
+
+    reorderPhotons<<<numBlocks, blockSize>>>(
+        *photons,
+        *photons_sorted, 
+        photonCount,
+        d_indices_out
+    );
+
+    cudaMemset(d_cell_start, 0xFF, hashTableSize * sizeof(unsigned int));
+    cudaMemset(d_cell_end,   0xFF, hashTableSize * sizeof(unsigned int));
+
+    buildTable<<<numBlocks, blockSize>>>(
+        d_hash_keys_out,
+        d_cell_start,
+        d_cell_end,
+        photonCount
+    );
+}
+
+__global__ void initRNG(curandState* states, int width, int height, unsigned long seed)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    curand_init(seed, idx, 0, &states[idx]);  
+}
+
+__device__ void removeMaterialFromStack(int* stack, int* stackTop, int materialID)
+{
+    int i_found = -1;
+    for (int i = (*stackTop) - 1; i > 0; i--)
+    {
+        if (stack[i] == materialID)
+        {
+            i_found = i;
+            break;
+        }
+    }
+
+    if (i_found != -1)
+    {
+        for (int i = i_found; i < (*stackTop) - 1; i++)
+        {
+            stack[i] = stack[i + 1];
+        }
+        (*stackTop)--;
+    }
+}
+
+__device__ inline float4 sampleSky(float4 direction)
+{
+    return f4();
+    float4 unit_dir = normalize(direction); 
+
+    float t = 0.5f * (unit_dir.y + 1.0f);
+
+    //float4 c_horizon = 2.2f* f4(1.0f, 0.8f, 0.2f);
+    //float4 c_zenith  = f4(0.4f, 0.4f, 0.8f);
+    float4 c_horizon = 1.0f * f4(1.0f, 0.4f, 0.2f);
+    //float4 c_horizon = 1.0f * f4(1.0f, 1.0f, 0.2f);
+    float4 c_zenith  = f4(0.3f, 0.4f, 0.8f);
+    //float4 c_zenith  = f4(0.9f, 0.9f, 0.2f);
+
+    float4 sky_color = (1.0f - t) * c_horizon + t * c_zenith;
+
+    float4 sun_dir = normalize(f4(-0.45f, 0.05f, 0.866f)); 
+    float sun_focus = 800.0f;
+    float sun_intensity = 15.0f;
+    float4 sun_base = f4(1.0f, 0.8f, 0.2f);
+
+    float sun_factor = pow(max(0.0f, dot(unit_dir, sun_dir)), sun_focus);
+    float4 sun_final = sun_base * sun_intensity * sun_factor;
+
+    return sky_color;
+}

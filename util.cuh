@@ -1,15 +1,28 @@
 #pragma once
 
+/*
 #include <cuda_runtime.h>
 #include <math.h>
 #include <iostream>
 #include <vector>
+#include <numeric>
 #include <curand_kernel.h>
 #include <sstream>
 #include <string>
 #include <algorithm>
 #include <cuda_fp16.h>
-using namespace std;
+#include <fstream>
+#include <iostream>
+#include <set>
+#include <iomanip>  
+#include <chrono>
+#include "imageUtil.cuh" 
+*/
+
+#include <cuda_runtime.h>
+#include <curand_kernel.h>
+#include <algorithm>
+#include <sstream>
 
 __device__ __constant__ float EPSILON = 0.00001f;
 __device__ __constant__ float RAY_EPSILON = 0.0001f;
@@ -367,4 +380,48 @@ __device__ __forceinline__ float4 unpackOct(unsigned int packed)
     
     float len = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
     return f4(v.x / len, v.y / len, v.z / len, 0.0f); // Direction, alpha 0
+}
+
+__host__ inline bool IsPrime(int n) {
+    if (n <= 1) return false;
+    if (n == 2 || n == 3) return true;
+    if (n % 2 == 0 || n % 3 == 0) return false;
+
+    for (int i = 5; i * i <= n; i += 6) {
+        if (n % i == 0 || n % (i + 2) == 0)
+            return false;
+    }
+    return true;
+}
+
+__host__ inline int GetNextPrime(int n) {
+    if (n <= 2) return 2;
+    if (n % 2 == 0) n++;
+
+    while (!IsPrime(n)) {
+        n += 2;
+    }
+    return n;
+}
+
+__device__ inline unsigned int ComputeGridHash(float4 pos, float4 sceneMin, float mergeRadius, int hashTableSize) {
+    // 1. Quantize: Find 3D Grid Integer Coordinate
+    int3 gridPos;
+    gridPos.x = floorf((pos.x - sceneMin.x) / mergeRadius);
+    gridPos.y = floorf((pos.y - sceneMin.y) / mergeRadius);
+    gridPos.z = floorf((pos.z - sceneMin.z) / mergeRadius);
+
+    // 2. Hash: Map 3D -> 1D
+    // Primes are used to scramble the bits to avoid patterns
+    gridPos.x = gridPos.x * 73856093;
+    gridPos.y = gridPos.y * 19349663;
+    gridPos.z = gridPos.z * 83492791;
+    
+    uint32_t hash = (gridPos.x ^ gridPos.y ^ gridPos.z) % hashTableSize;
+    return hash;
+}
+
+__host__ inline float calculateMergeRadius(float initialRadius, float alpha, int currSample)
+{
+    return initialRadius * sqrtf( 1.0f / powf(currSample + 1, alpha));
 }

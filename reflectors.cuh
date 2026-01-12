@@ -1,3 +1,5 @@
+#pragma once
+
 #include <cuda_runtime.h>
 #include <cuda.h>
 #include <math.h>
@@ -33,6 +35,24 @@ __device__ void cosine_sample_f(curandState& localState, const float4& baseColor
     wo = f4(x,y,z);
 
     cosine_f(baseColor, f_val);
+    cosine_pdf(wo, pdf);
+}
+
+__device__ void cosine_emit(curandState& localState, float4& wo, float& pdf)
+{
+    float u1 = curand_uniform(&localState);
+
+    u1 = fminf(u1, 1.0f-EPSILON);
+    float u2 = curand_uniform(&localState); 
+
+    float r = sqrt(u1);
+    float phi = 2.0f * PI * u2; 
+
+    float x = r * cos(phi);
+    float y = r * sin(phi);
+    float z = sqrt(1.0f - u1); 
+
+    wo = f4(x,y,z);
     cosine_pdf(wo, pdf);
 }
 
