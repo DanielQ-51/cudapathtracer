@@ -264,6 +264,8 @@ int initRender(string configPath, int renderNumber)
     float VCMMergeConstant = config.vcmMergeConst;
     float VCMInitialMergeRadiusMultiplier = config.vcmInitialMergeRadiusMultiplier;
 
+    std::cout << VCMMergeConstant << " and " << VCMInitialMergeRadiusMultiplier << std::endl;
+
     Camera camera;
     if (config.pinholeCamera)
         camera = Camera::Pinhole(config.camPos, w, h, config.camRot.x, config.camRot.y, config.camRot.z, config.camFov);
@@ -657,9 +659,12 @@ int initRender(string configPath, int renderNumber)
         cudaMalloc(&tempPaths.pos_x, sizeof(float) * totalLightPathVertices);
         cudaMalloc(&tempPaths.pos_y, sizeof(float) * totalLightPathVertices);
         cudaMalloc(&tempPaths.pos_z, sizeof(float) * totalLightPathVertices);
+        cudaMalloc(&tempPaths.beta_x, sizeof(half) * totalLightPathVertices);
+        cudaMalloc(&tempPaths.beta_y, sizeof(half) * totalLightPathVertices);
+        cudaMalloc(&tempPaths.beta_z, sizeof(half) * totalLightPathVertices);
         cudaMalloc(&tempPaths.packedNormal, sizeof(unsigned int) * totalLightPathVertices);
         cudaMalloc(&tempPaths.packedWo, sizeof(unsigned int) * totalLightPathVertices);
-        cudaMalloc(&tempPaths.packedBeta, sizeof(unsigned int) * totalLightPathVertices);
+        //cudaMalloc(&tempPaths.packedBeta, sizeof(unsigned int) * totalLightPathVertices);
         cudaMalloc(&tempPaths.packedInfo, sizeof(unsigned int) * totalLightPathVertices);
         cudaMalloc(&tempPaths.packedUV, sizeof(half2) * totalLightPathVertices);
         cudaMalloc(&tempPaths.d_vc, sizeof(float) * totalLightPathVertices);
@@ -669,9 +674,12 @@ int initRender(string configPath, int renderNumber)
         cudaMemset(tempPaths.pos_x, 0, sizeof(float) * totalLightPathVertices);
         cudaMemset(tempPaths.pos_y, 0, sizeof(float) * totalLightPathVertices);
         cudaMemset(tempPaths.pos_z, 0, sizeof(float) * totalLightPathVertices);
+        cudaMemset(tempPaths.beta_x, 0, sizeof(half) * totalLightPathVertices);
+        cudaMemset(tempPaths.beta_y, 0, sizeof(half) * totalLightPathVertices);
+        cudaMemset(tempPaths.beta_z, 0, sizeof(half) * totalLightPathVertices);
         cudaMemset(tempPaths.packedNormal, 0, sizeof(unsigned int) * totalLightPathVertices);
         cudaMemset(tempPaths.packedWo, 0, sizeof(unsigned int) * totalLightPathVertices);
-        cudaMemset(tempPaths.packedBeta, 0, sizeof(unsigned int) * totalLightPathVertices);
+        //cudaMemset(tempPaths.packedBeta, 0, sizeof(unsigned int) * totalLightPathVertices);
         cudaMemset(tempPaths.packedInfo, 0, sizeof(unsigned int) * totalLightPathVertices);
         cudaMemset(tempPaths.packedUV, 0, sizeof(half2) * totalLightPathVertices);
         cudaMemset(tempPaths.d_vc, 0, sizeof(float) * totalLightPathVertices);
@@ -690,7 +698,11 @@ int initRender(string configPath, int renderNumber)
         cudaMalloc(&tempPhotons.pos_y, sizeof(float) * totalPhotons);
         cudaMalloc(&tempPhotons.pos_z, sizeof(float) * totalPhotons);
         cudaMalloc(&tempPhotons.packedWi, sizeof(unsigned int) * totalPhotons);
-        cudaMalloc(&tempPhotons.packedPower, sizeof(unsigned int) * totalPhotons);
+        //cudaMalloc(&tempPhotons.packedPower, sizeof(unsigned int) * totalPhotons);
+        cudaMalloc(&tempPhotons.beta_x, sizeof(half) * totalPhotons);
+        cudaMalloc(&tempPhotons.beta_y, sizeof(half) * totalPhotons);
+        cudaMalloc(&tempPhotons.beta_z, sizeof(half) * totalPhotons);
+        cudaMalloc(&tempPhotons.packedNormal, sizeof(unsigned int) * totalPhotons);
         cudaMalloc(&tempPhotons.d_vc, sizeof(float) * totalPhotons);
         cudaMalloc(&tempPhotons.d_vcm, sizeof(float) * totalPhotons);
         cudaMalloc(&tempPhotons.d_vm, sizeof(float) * totalPhotons);
@@ -698,8 +710,12 @@ int initRender(string configPath, int renderNumber)
         cudaMemset(tempPhotons.pos_x, 0, sizeof(float) * totalPhotons);
         cudaMemset(tempPhotons.pos_y, 0, sizeof(float) * totalPhotons);
         cudaMemset(tempPhotons.pos_z, 0, sizeof(float) * totalPhotons);
+        cudaMemset(tempPhotons.beta_x, 0, sizeof(half) * totalPhotons);
+        cudaMemset(tempPhotons.beta_y, 0, sizeof(half) * totalPhotons);
+        cudaMemset(tempPhotons.beta_z, 0, sizeof(half) * totalPhotons);
         cudaMemset(tempPhotons.packedWi, 0, sizeof(unsigned int) * totalPhotons);
-        cudaMemset(tempPhotons.packedPower, 0, sizeof(unsigned int) * totalPhotons);
+        //cudaMemset(tempPhotons.packedPower, 0, sizeof(unsigned int) * totalPhotons);
+        cudaMemset(tempPhotons.packedNormal, 0, sizeof(unsigned int) * totalPhotons);
         cudaMemset(tempPhotons.d_vc, 0, sizeof(float) * totalPhotons);
         cudaMemset(tempPhotons.d_vcm, 0, sizeof(float) * totalPhotons);
         cudaMemset(tempPhotons.d_vm, 0, sizeof(float) * totalPhotons);
@@ -714,7 +730,10 @@ int initRender(string configPath, int renderNumber)
         cudaMalloc(&tempPhotons1.pos_y, sizeof(float) * totalPhotons);
         cudaMalloc(&tempPhotons1.pos_z, sizeof(float) * totalPhotons);
         cudaMalloc(&tempPhotons1.packedWi, sizeof(unsigned int) * totalPhotons);
-        cudaMalloc(&tempPhotons1.packedPower, sizeof(unsigned int) * totalPhotons);
+        cudaMalloc(&tempPhotons1.beta_x, sizeof(half) * totalPhotons);
+        cudaMalloc(&tempPhotons1.beta_y, sizeof(half) * totalPhotons);
+        cudaMalloc(&tempPhotons1.beta_z, sizeof(half) * totalPhotons);
+        cudaMalloc(&tempPhotons1.packedNormal, sizeof(unsigned int) * totalPhotons);
         cudaMalloc(&tempPhotons1.d_vc, sizeof(float) * totalPhotons);
         cudaMalloc(&tempPhotons1.d_vcm, sizeof(float) * totalPhotons);
         cudaMalloc(&tempPhotons1.d_vm, sizeof(float) * totalPhotons);
@@ -723,7 +742,10 @@ int initRender(string configPath, int renderNumber)
         cudaMemset(tempPhotons1.pos_y, 0, sizeof(float) * totalPhotons);
         cudaMemset(tempPhotons1.pos_z, 0, sizeof(float) * totalPhotons);
         cudaMemset(tempPhotons1.packedWi, 0, sizeof(unsigned int) * totalPhotons);
-        cudaMemset(tempPhotons1.packedPower, 0, sizeof(unsigned int) * totalPhotons);
+        cudaMemset(tempPhotons1.beta_x, 0, sizeof(half) * totalPhotons);
+        cudaMemset(tempPhotons1.beta_y, 0, sizeof(half) * totalPhotons);
+        cudaMemset(tempPhotons1.beta_z, 0, sizeof(half) * totalPhotons);
+        cudaMemset(tempPhotons1.packedNormal, 0, sizeof(unsigned int) * totalPhotons);
         cudaMemset(tempPhotons1.d_vc, 0, sizeof(float) * totalPhotons);
         cudaMemset(tempPhotons1.d_vcm, 0, sizeof(float) * totalPhotons);
         cudaMemset(tempPhotons1.d_vm, 0, sizeof(float) * totalPhotons);
@@ -755,7 +777,9 @@ int initRender(string configPath, int renderNumber)
         cudaFree(tempPaths.pos_z);
         cudaFree(tempPaths.packedNormal);
         cudaFree(tempPaths.packedWo);
-        cudaFree(tempPaths.packedBeta);
+        cudaFree(tempPaths.beta_x);
+        cudaFree(tempPaths.beta_y);
+        cudaFree(tempPaths.beta_z);
         cudaFree(tempPaths.packedInfo);
         cudaFree(tempPaths.packedUV);
         cudaFree(tempPaths.d_vc);
@@ -767,8 +791,11 @@ int initRender(string configPath, int renderNumber)
         cudaFree(tempPhotons.pos_x);
         cudaFree(tempPhotons.pos_y);
         cudaFree(tempPhotons.pos_z);
-        cudaFree(tempPhotons.packedPower);
+        cudaFree(tempPhotons.beta_x);
+        cudaFree(tempPhotons.beta_y);
+        cudaFree(tempPhotons.beta_z);
         cudaFree(tempPhotons.packedWi);
+        cudaFree(tempPhotons.packedNormal);
         cudaFree(tempPhotons.d_vcm);
         cudaFree(tempPhotons.d_vc);
         cudaFree(tempPhotons.d_vm);
@@ -778,8 +805,11 @@ int initRender(string configPath, int renderNumber)
         cudaFree(tempPhotons1.pos_x);
         cudaFree(tempPhotons1.pos_y);
         cudaFree(tempPhotons1.pos_z);
-        cudaFree(tempPhotons1.packedPower);
+        cudaFree(tempPhotons1.beta_x);
+        cudaFree(tempPhotons1.beta_y);
+        cudaFree(tempPhotons1.beta_z);
         cudaFree(tempPhotons1.packedWi);
+        cudaFree(tempPhotons1.packedNormal);
         cudaFree(tempPhotons1.d_vcm);
         cudaFree(tempPhotons1.d_vc);
         cudaFree(tempPhotons1.d_vm);

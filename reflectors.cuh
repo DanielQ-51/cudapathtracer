@@ -302,13 +302,8 @@ __device__ void smooth_dielectric_pdf(
 }
 // wi is always point away from the surface on the positive z hemisphere. since we flipped the intersect normal if it was a backface before converting to local
 __device__ void dumb_smooth_dielectric_sample_f(curandState& localState,
-    const float4& wi, float etaSurface, bool backface, float4& wo, float4& f_val, float& pdf)
+    const float4& wi, float etaSurface, bool backface, int transportMode, float4& wo, float4& f_val, float& pdf)
 {
-    if (isnan(wi.x) || isnan(wi.y) || isnan(wi.z)) {
-        printf("NaN DETECTED ON INPUT WI: (%f, %f, %f)\n", wi.x, wi.y, wi.z);
-        // Return dummy data to prevent driver crash downstream
-        wo = f4(0,0,1); f_val = f4(0); pdf = 0; return; 
-    }
     float etaI, etaT;
     if (backface)
     {
@@ -336,12 +331,6 @@ __device__ void dumb_smooth_dielectric_sample_f(curandState& localState,
         float cosThetaO = wo.z;
         f_val = f4(1.0f / fmaxf(cosThetaO, EPSILON));
         pdf = 1.0f;
-
-        if (isnan(wo.x) || isnan(wo.y) || isnan(wo.z)) {
-            printf("TIR NaN DETECTED ON OUTPUT WO, WI is: (%f, %f, %f)\n", wi.x, wi.y, wi.z);
-            // Return dummy data to prevent driver crash downstream
-            wo = f4(0,0,1); f_val = f4(0); pdf = 0; return; 
-        }
         return;
     }
     
@@ -350,12 +339,6 @@ __device__ void dumb_smooth_dielectric_sample_f(curandState& localState,
         float cosThetaO = wo.z;
         pdf = F;
         f_val = f4(F / fmaxf(cosThetaO, EPSILON));
-
-        if (isnan(wo.x) || isnan(wo.y) || isnan(wo.z)) {
-            printf("REFL NaN DETECTED ON OUTPUT WO, WI is: (%f, %f, %f)\n", wi.x, wi.y, wi.z);
-            // Return dummy data to prevent driver crash downstream
-            wo = f4(0,0,1); f_val = f4(0); pdf = 0; return; 
-        }
     } 
     else {
         float eta = etaI / etaT;
@@ -370,13 +353,17 @@ __device__ void dumb_smooth_dielectric_sample_f(curandState& localState,
 
         // BSDF term
         float denom = fmaxf(fabsf(cosThetaO), EPSILON);
-        f_val = f4((1.0f - F) * eta * eta / denom);
+        f_val = f4((1.0f - F)/ denom);
         pdf = 1.0f - F;
 
-        if (isnan(wo.x) || isnan(wo.y) || isnan(wo.z)) {
-            printf("REFR NaN DETECTED ON OUTPUT WO, WI is: (%f, %f, %f)\n", wi.x, wi.y, wi.z);
-            // Return dummy data to prevent driver crash downstream
-            wo = f4(0,0,1); f_val = f4(0); pdf = 0; return; 
+        // adjoint bsdf handling
+        if (transportMode == TRANSPORTMODE_IMPORTANCE)
+        {
+            // do nothing, throughput conserved
+        }
+        else if (transportMode == TRANSPORTMODE_RADIANCE)
+        {
+            f_val *= eta * eta;
         }
     }
 }
@@ -558,7 +545,8 @@ __device__ void leaf_sample_f(curandState& localState, const float4& wi, float i
 // For dielectrics, when this function is called, we know whether or not it refracts, and that etaI and etaT are in fact correct
 // wi passed in is facing the surface, so we flip it normally. The shading uses wi as pointing away
 __device__ void f_eval(const Material* materials, int materialID, float4* textures,
-    const float4& wi, const float4& wo, float etaI, float etaT, float4& f_val, const float2 uv)
+    const float4& wi, const float4& wo, float etaI, float etaT, float4& f_val, const float2 uv,
+    int transportMode = TRANSPORTMODE_RADIANCE)
 {
     const Material& mat = materials[materialID];
     float4 albedo = mat.albedo;
@@ -598,7 +586,8 @@ __device__ void f_eval(const Material* materials, int materialID, float4* textur
 // For dielectrics, when this function is called, we know whether or not it refracts, and that etaI and etaT are in fact correct
 // wi passed in is facing the surface, so we flip it normally. The shading uses wi as pointing away
 __device__ void sample_f_eval(curandState& localState, const Material* materials, int materialID, float4* textures, 
-    const float4& wi, float etaI, float etaT, bool backface, float4& wo, float4& f_val, float& pdf, const float2 uv)
+    const float4& wi, float etaI, float etaT, bool backface, float4& wo, float4& f_val, float& pdf, const float2 uv, 
+    int transportMode = TRANSPORTMODE_RADIANCE)
 {
     if (isnan(wi.x) || isnan(wi.y) || isnan(wi.z)) {
         //printf("NaN DETECTED ON INPUT WI: (%f, %f, %f)\n", wi.x, wi.y, wi.z);
@@ -626,7 +615,7 @@ __device__ void sample_f_eval(curandState& localState, const Material* materials
     }
     else if (mat.type == MAT_SMOOTHDIELECTRIC)
     {
-        dumb_smooth_dielectric_sample_f(localState, -wi, mat.ior, backface, wo, f_val, pdf);
+        dumb_smooth_dielectric_sample_f(localState, -wi, mat.ior, backface, transportMode, wo, f_val, pdf);
         //smooth_dielectric_sample_f(localState, -wi, etaI, etaT, wo, f_val, pdf);
     }
     else if (mat.type == MAT_LEAF)

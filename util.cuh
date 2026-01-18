@@ -28,7 +28,7 @@ __device__ __constant__ float EPSILON = 0.00001f;
 __device__ __constant__ float RAY_EPSILON = 0.0001f;
 __device__ __constant__ float PI = 3.141592f;
 __device__ __constant__ float SKY_RADIUS = 100.0f;
-__device__ __constant__ float MAX_FIREFLY_LUM = 15.0f;
+__device__ __constant__ float MAX_FIREFLY_LUM = 1.0f;
 
 constexpr bool DO_PROGRESSIVERENDER = true;
 
@@ -342,44 +342,52 @@ __device__ __forceinline__ float signNotZero(float k) { return (k >= 0.0f) ? 1.0
 __device__ __forceinline__ unsigned int packOct(float4 v)
 {
     float l1norm = fabsf(v.x) + fabsf(v.y) + fabsf(v.z);
-    float2 res = make_float2(v.x, v.y);
+    float invL1 = (l1norm > 0.0f) ? (1.0f / l1norm) : 0.0f;
     
-    if (l1norm > 0.0f) {
-        res.x /= l1norm;
-        res.y /= l1norm;
+    float2 res;
+    res.x = v.x * invL1;
+    res.y = v.y * invL1;
+
+    // 2. Reflect folds if in lower hemisphere
+    if (v.z < 0.0f) {
+        float tempX = res.x;
+        float tempY = res.y;
+        res.x = (1.0f - fabsf(tempY)) * signNotZero(tempX);
+        res.y = (1.0f - fabsf(tempX)) * signNotZero(tempY);
     }
 
-    if (v.z < 0.0f) {
-        float tempX = (1.0f - fabsf(res.y)) * signNotZero(res.x);
-        float tempY = (1.0f - fabsf(res.x)) * signNotZero(res.y);
-        res.x = tempX;
-        res.y = tempY;
-    }
-    
-    // Compress to 16-bit SNORM
-    unsigned int x = (unsigned int)(fminf(fmaxf(res.x, -1.0f), 1.0f) * 32767.0f + 32767.5f);
-    unsigned int y = (unsigned int)(fminf(fmaxf(res.y, -1.0f), 1.0f) * 32767.0f + 32767.5f);
-    
-    return (y << 16) | x;
+    // 3. SNORM Quantization (The Fix)
+    // We map [-1, 1] -> [-32767, 32767]
+    // We use __float2int_rn to Round-to-Nearest, reducing error further.
+    int16_t x = (int16_t)__float2int_rn(fminf(fmaxf(res.x, -1.0f), 1.0f) * 32767.0f);
+    int16_t y = (int16_t)__float2int_rn(fminf(fmaxf(res.y, -1.0f), 1.0f) * 32767.0f);
+
+    // Pack two int16s into one uint32
+    // We cast to uint16_t first to ensure bits are preserved correctly during shift
+    return ((uint32_t)(uint16_t)x) | (((uint32_t)(uint16_t)y) << 16);
 }
 
-__device__ __forceinline__ float4 unpackOct(unsigned int packed)
-{
-    float2 res;
-    res.x = (float)(packed & 0xFFFF) / 32767.0f - 1.0f;
-    res.y = (float)(packed >> 16) / 32767.0f - 1.0f;
-    
-    float3 v = make_float3(res.x, res.y, 1.0f - fabsf(res.x) - fabsf(res.y));
-    
-    if (v.z < 0.0f) {
-        float tempX = (1.0f - fabsf(v.y)) * signNotZero(v.x);
-        float tempY = (1.0f - fabsf(v.x)) * signNotZero(v.y);
-        v.x = tempX;
-        v.y = tempY;
-    }
-    
-    float len = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
-    return f4(v.x / len, v.y / len, v.z / len, 0.0f); // Direction, alpha 0
+__device__ __forceinline__ float4 unpackOct(uint32_t p) {
+    int16_t packedX = (int16_t)(p & 0xFFFF);
+    int16_t packedY = (int16_t)(p >> 16);
+
+    // 2. Convert back to float [-1, 1]
+    // Using max(-1.0f, ...) prevents -32768 (if it occurred) from breaking things
+    float x = fmaxf(-1.0f, packedX / 32767.0f);
+    float y = fmaxf(-1.0f, packedY / 32767.0f);
+
+    // 3. Map back to Sphere
+    float3 v;
+    v.x = x;
+    v.y = y;
+    v.z = 1.0f - (fabsf(x) + fabsf(y));
+
+    float t = fmaxf(-v.z, 0.0f);
+    v.x += (v.x >= 0.0f) ? -t : t;
+    v.y += (v.y >= 0.0f) ? -t : t;
+
+    float invLen = rsqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+    return make_float4(v.x * invLen, v.y * invLen, v.z * invLen, 0.0f);
 }
 
 __host__ inline bool IsPrime(int n) {

@@ -574,6 +574,11 @@ enum IntegratorChoice {
     VCM = 3
 };
 
+enum TransportMode {
+    TRANSPORTMODE_IMPORTANCE = 0,
+    TRANSPORTMODE_RADIANCE = 1
+};
+
 __host__ inline int matchIntegrator(std::string name)
 {
     if (name == "UNIDIRECTIONAL") return 0;
@@ -924,9 +929,9 @@ __host__ inline bool loadConfig(const std::string& filepath, RenderConfig& confi
             else if (key == "Camera Rotation") config.camRot = parseVec3(value);
             else if (key == "Camera FOV") config.camFov = std::stof(value);
             else if (key == "Camera Apeture") config.camApeture = std::stof(value);
-            else if (key == "Camera FocalDist:") config.camFocalDist = std::stof(value);
-            else if (key == "VCM Merge Radius Power Factor:") config.vcmMergeConst = std::stof(value);
-            else if (key == "VCM Initial Merge Radius Multipler:") config.vcmInitialMergeRadiusMultiplier = std::stof(value);
+            else if (key == "Camera FocalDist") config.camFocalDist = std::stof(value);
+            else if (key == "VCM Merge Radius Power Factor") config.vcmMergeConst = std::stof(value);
+            else if (key == "VCM Initial Merge Radius Multiplier") config.vcmInitialMergeRadiusMultiplier = std::stof(value);
         }
     }
     return true;
@@ -962,7 +967,10 @@ struct VCMPathVertices
     unsigned int* packedWo;
 
     // need to do shared exponent packing
-    unsigned int* packedBeta;
+    //unsigned int* packedBeta;
+    half* beta_x;
+    half* beta_y;
+    half* beta_z;
 
     half2* packedUV;
 
@@ -1083,7 +1091,7 @@ __device__ __forceinline__ void setIsBackface(VCMPathVertices& x, int idx, bool 
 
 __device__ __forceinline__ float4 getPos(const VCMPathVertices& verts, int idx) 
 {
-    return f4(verts.pos_x[idx], verts.pos_y[idx], verts.pos_z[idx], 1.0f);
+    return f4(verts.pos_x[idx], verts.pos_y[idx], verts.pos_z[idx], 0.0f);
 }
 
 __device__ __forceinline__ void setPos(VCMPathVertices& verts, int idx, float4 p) 
@@ -1110,11 +1118,15 @@ __device__ __forceinline__ void setWo(VCMPathVertices& x, int idx, float4 wo) {
 }
 
 __device__ __forceinline__ float4 getBeta(const VCMPathVertices& x, int idx) {
-    return fromRGB9E5(x.packedBeta[idx]);
+    //return fromRGB9E5(x.packedBeta[idx]);
+    return f4(__half2float(x.beta_x[idx]), __half2float(x.beta_y[idx]), __half2float(x.beta_z[idx]), 0.0f);
 }
 
 __device__ __forceinline__ void setBeta(VCMPathVertices& x, int idx, float4 b) {
-    x.packedBeta[idx] = toRGB9E5(b);
+    //x.packedBeta[idx] = toRGB9E5(b);
+    x.beta_x[idx] = __float2half(b.x);
+    x.beta_y[idx] = __float2half(b.y);
+    x.beta_z[idx] = __float2half(b.z);
 }
 
 __device__ __forceinline__ float2 getUV(const VCMPathVertices& x, int idx) {
@@ -1160,8 +1172,11 @@ struct Photons
 
     // current to previous
     unsigned int* packedWi;
-
-    unsigned int* packedPower;
+    unsigned int* packedNormal;
+    
+    half* beta_x;
+    half* beta_y;
+    half* beta_z;
 
     float* d_vc;
     float* d_vm; 
@@ -1170,7 +1185,7 @@ struct Photons
 
 __device__ __forceinline__ float4 getPos(const Photons& ps, int idx) 
 {
-    return f4(ps.pos_x[idx], ps.pos_y[idx], ps.pos_z[idx], 1.0f);
+    return f4(ps.pos_x[idx], ps.pos_y[idx], ps.pos_z[idx], 0.0f);
 }
 
 __device__ __forceinline__ void setPos(Photons& ps, int idx, float4 p) 
@@ -1178,6 +1193,14 @@ __device__ __forceinline__ void setPos(Photons& ps, int idx, float4 p)
     ps.pos_x[idx] = p.x;
     ps.pos_y[idx] = p.y;
     ps.pos_z[idx] = p.z;
+}
+
+__device__ __forceinline__ float4 getNormal(const Photons& x, int idx) {
+    return unpackOct(x.packedNormal[idx]);
+}
+
+__device__ __forceinline__ void setNormal(Photons& x, int idx, float4 n) {
+    x.packedNormal[idx] = packOct(n);
 }
 
 __device__ __forceinline__ float4 getWi(const Photons& x, int idx) {
@@ -1189,11 +1212,13 @@ __device__ __forceinline__ void setWi(Photons& x, int idx, float4 wi) {
 }
 
 __device__ __forceinline__ float4 getBeta(const Photons& x, int idx) {
-    return fromRGB9E5(x.packedPower[idx]);
+    return f4(__half2float(x.beta_x[idx]), __half2float(x.beta_y[idx]), __half2float(x.beta_z[idx]), 0.0f);
 }
 
 __device__ __forceinline__ void setBeta(Photons& x, int idx, float4 b) {
-    x.packedPower[idx] = toRGB9E5(b);
+    x.beta_x[idx] = __float2half(b.x);
+    x.beta_y[idx] = __float2half(b.y);
+    x.beta_z[idx] = __float2half(b.z);
 }
 
 __device__ __forceinline__ float getD_vc(const Photons& x, int idx) {

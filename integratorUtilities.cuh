@@ -2,6 +2,8 @@
 
 #include "reflectors.cuh"
 #include <cub/cub.cuh>
+#include <random>
+#include <ctime>
 
 __device__ inline bool triangleIntersect(Vertices* verts, Triangle* tri, const Ray& r, float4& barycentric, float& tval)
 {
@@ -398,7 +400,8 @@ __device__ inline unsigned int ComputeGridHash(float4 pos, float4 sceneMin, floa
     gridPos.y = gridPos.y * 19349663;
     gridPos.z = gridPos.z * 83492791;
     
-    uint32_t hash = (gridPos.x ^ gridPos.y ^ gridPos.z) % hashTableSize;
+    unsigned int combined = (unsigned int)(gridPos.x ^ gridPos.y ^ gridPos.z);
+    unsigned int hash = combined % hashTableSize;
     return hash;
 }
 
@@ -458,4 +461,50 @@ __device__ inline float4 sampleSky(float4 direction)
     float4 sun_final = sun_base * sun_intensity * sun_factor;
 
     return sky_color;
+}
+
+__host__ inline void checkCudaErrors(char * name)
+{
+    cudaError_t launchErr = cudaGetLastError();
+    if (launchErr != cudaSuccess) {
+        printf("!!! At %s Kernel Launch Failed: %s !!!\n", name, cudaGetErrorString(launchErr));
+    }
+
+    cudaError_t syncErr = cudaDeviceSynchronize();
+    if (syncErr != cudaSuccess) {
+        printf("!!! At %s Kernel Execution Crashed: %s !!!\n", name, cudaGetErrorString(syncErr));
+    }
+}
+
+std::vector<float4> generateRandomProbes(int count, float4 sceneCenter, float sceneRadius) 
+{
+    std::vector<float4> probes;
+    probes.reserve(count);
+
+    // Initialize random number generator
+    static std::mt19937 rng(std::time(nullptr)); 
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+
+    while (probes.size() < count) 
+    {
+        // Generate a random point in a unit cube [-1, 1]
+        float u = dist(rng);
+        float v = dist(rng);
+        float w = dist(rng);
+
+        // Rejection sampling: Only keep points inside the unit sphere
+        // to avoid "corner bias"
+        if ((u * u + v * v + w * w) <= 1.0f) 
+        {
+            float4 p;
+            p.x = sceneCenter.x + (u * sceneRadius);
+            p.y = sceneCenter.y + (v * sceneRadius);
+            p.z = sceneCenter.z + (w * sceneRadius);
+            p.w = 0.0f; // Padding/Type matching
+
+            probes.push_back(p);
+        }
+    }
+
+    return probes;
 }
