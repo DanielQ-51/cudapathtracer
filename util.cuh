@@ -25,10 +25,10 @@
 #include <sstream>
 
 __device__ __constant__ float EPSILON = 0.00001f;
-__device__ __constant__ float RAY_EPSILON = 0.0001f;
+__device__ __constant__ float RAY_EPSILON = 0.001f;
 __device__ __constant__ float PI = 3.141592f;
 __device__ __constant__ float SKY_RADIUS = 100.0f;
-__device__ __constant__ float MAX_FIREFLY_LUM = 1.0f;
+__device__ __constant__ float MAX_FIREFLY_LUM = 5.0f;
 
 constexpr bool DO_PROGRESSIVERENDER = true;
 

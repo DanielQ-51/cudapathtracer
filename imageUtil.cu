@@ -70,9 +70,6 @@ void Image::saveImageBMP(std::string fileName) {
 
     std::vector<float4> data = postProcess ? postProcessImage() : pixels;
 
-    if (postProcess)
-        std::cout << "saved with post processing\n";
-
     BMPFileHeader fileHeader;
     BMPInfoHeader infoHeader;
 

@@ -361,7 +361,7 @@ __global__ void cleanAndFormatImage(
         finalColor = f4(0.0f, 1.0f, 0.0f);
     } 
     else if (acc.x < 0 || acc.y < 0 || acc.z < 0) {
-        finalColor = f4(1.0f, 0.0f, 0.0f);
+        finalColor = f4(0.0f, 0.0f, 1.0f);
     } 
     else {
         // 3. Normalize (Average the samples)
@@ -388,14 +388,11 @@ __device__ int3 GetGridIndex(float4 p, float4 sceneMin, float cellSize) {
 }
 
 __device__ inline unsigned int ComputeGridHash(float4 pos, float4 sceneMin, float mergeRadius, int hashTableSize) {
-    // 1. Quantize: Find 3D Grid Integer Coordinate
     int3 gridPos;
     gridPos.x = floorf((pos.x - sceneMin.x) / mergeRadius);
     gridPos.y = floorf((pos.y - sceneMin.y) / mergeRadius);
     gridPos.z = floorf((pos.z - sceneMin.z) / mergeRadius);
 
-    // 2. Hash: Map 3D -> 1D
-    // Primes are used to scramble the bits to avoid patterns
     gridPos.x = gridPos.x * 73856093;
     gridPos.y = gridPos.y * 19349663;
     gridPos.z = gridPos.z * 83492791;
@@ -463,7 +460,7 @@ __device__ inline float4 sampleSky(float4 direction)
     return sky_color;
 }
 
-__host__ inline void checkCudaErrors(char * name)
+__host__ inline void checkCudaErrors(const char * name)
 {
     cudaError_t launchErr = cudaGetLastError();
     if (launchErr != cudaSuccess) {

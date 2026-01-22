@@ -13,6 +13,10 @@ __device__ __constant__ bool BDPT_NEE;
 __device__ __constant__ bool BDPT_NAIVE;
 __device__ __constant__ bool BDPT_CONNECTION;
 
+__device__ __constant__ bool VCM_DOMERGE;
+
+__device__ __constant__ bool DO_SPPM;
+
 __device__ __constant__ bool BDPT_DRAWPATH;
 __device__ __constant__ bool BDPT_DOMIS;
 __device__ __constant__ bool BDPT_PAINTWEIGHT;
@@ -38,9 +42,11 @@ __host__ void updateConstants(RenderConfig& config)
     cudaMemcpyToSymbol(BDPT_NEE, &config.bdptNee, sizeof(bool));
     cudaMemcpyToSymbol(BDPT_CONNECTION, &config.bdptConnection, sizeof(bool));
     cudaMemcpyToSymbol(BDPT_DRAWPATH, &config.bdptDrawPath, sizeof(bool));
+    cudaMemcpyToSymbol(VCM_DOMERGE, &config.vcmDoMerge, sizeof(bool));
     cudaMemcpyToSymbol(BDPT_DOMIS, &config.bdptDoMis, sizeof(bool));
     cudaMemcpyToSymbol(BDPT_PAINTWEIGHT, &config.bdptPaintWeight, sizeof(bool));
     cudaMemcpyToSymbol(SAMPLE_ENVIRONMENT, &config.sampleEnvironment, sizeof(bool));
+    cudaMemcpyToSymbol(DO_SPPM, &config.doSPPM, sizeof(bool));
     return;
 }
 
@@ -509,7 +515,7 @@ __global__ void Li_unidirectional (curandState* rngStates, Camera camera, Materi
             //float4 wo_world = normalize(r.direction);
             toLocal(r.direction, intersect.normal, wo_local);
             //r.origin = intersect.point - intersect.normal * EPSILON * 1.0F; // needs to go through, so offset on other side of normal
-            r.origin = intersect.point + r.direction * 0.001f; // needs to go through, so offset on other side of normal
+            r.origin = intersect.point + r.direction * RAY_EPSILON; // needs to go through, so offset on other side of normal
             depth--; // to unbias the russian roulette, which depends on a maxdepth (false hits do not contribute actual depth)
         }
         previousintersectANY = intersect;
@@ -1624,6 +1630,8 @@ __device__ bool connectPath(curandState& localState, int t, int s, int x, int y,
                 misWeight = 1.0f / (1.0f + wEye + wLight);
 
                 contribution = Le * eyePath->beta[eyePathIDX];
+
+                //printf("<%f, %f, %f> * <%f, %f, %f>\n", Le.x, Le.y, Le.z, eyePath->beta[eyePathIDX].x, eyePath->beta[eyePathIDX].y, eyePath->beta[eyePathIDX].z);
                 
 
                 float lum = luminance(contribution);
@@ -2123,6 +2131,10 @@ __device__ void generateVCMLightPath(curandState& localState, int x, int y, int 
             curr_d_vc = G * G / (pdf_trace * pdf_trace * pdfFwd_area * pdfFwd_area);
             curr_d_vm = G * G / (pdf_trace * pdf_trace * pdfFwd_area * pdfFwd_area * eta_vcm * eta_vcm);
 
+            curr_d_vcm = (pdf_connect) / (pdf_trace * pdfFwd_area);
+            curr_d_vc = G / (pdf_trace * pdfFwd_area);
+            curr_d_vm = G / (pdf_trace * pdfFwd_area * eta_vcm);
+
             prev_d_vcm = curr_d_vcm;
             prev_d_vc = curr_d_vc;
             prev_d_vm = curr_d_vm;
@@ -2135,6 +2147,10 @@ __device__ void generateVCMLightPath(curandState& localState, int x, int y, int 
             curr_d_vcm = 0.0f;
             curr_d_vc = (G * G / (pdfFwd_area * pdfFwd_area)) * (pdf_onebeforePrevRev_SA * pdf_onebeforePrevRev_SA * prev_d_vc);
             curr_d_vm = (G * G / (pdfFwd_area * pdfFwd_area)) * (pdf_onebeforePrevRev_SA * pdf_onebeforePrevRev_SA * prev_d_vm);
+
+            curr_d_vcm = 0.0f;
+            curr_d_vc = (G / (pdfFwd_area)) * (pdf_onebeforePrevRev_SA * prev_d_vc);
+            curr_d_vm = (G / (pdfFwd_area)) * (pdf_onebeforePrevRev_SA * prev_d_vm);
 
             prev_d_vcm = curr_d_vcm;
             prev_d_vc = curr_d_vc;
@@ -2151,6 +2167,12 @@ __device__ void generateVCMLightPath(curandState& localState, int x, int y, int 
                 (eta_vcm * eta_vcm + prev_d_vcm + pdf_onebeforePrevRev_SA * pdf_onebeforePrevRev_SA * prev_d_vc);
             curr_d_vm = (G * G / (pdfFwd_area * pdfFwd_area)) * 
                 (1.0f + prev_d_vcm / (eta_vcm * eta_vcm) + pdf_onebeforePrevRev_SA * pdf_onebeforePrevRev_SA * prev_d_vm);
+
+            curr_d_vcm = 1.0f / (pdfFwd_area);
+            curr_d_vc = (G / (pdfFwd_area)) * 
+                (eta_vcm + prev_d_vcm + pdf_onebeforePrevRev_SA * prev_d_vc);
+            curr_d_vm = (G / (pdfFwd_area)) * 
+                (1.0f + prev_d_vcm / (eta_vcm) + pdf_onebeforePrevRev_SA * prev_d_vm);
 
             prev_d_vcm = curr_d_vcm;
             prev_d_vc = curr_d_vc;
@@ -2177,23 +2199,27 @@ __device__ void generateVCMLightPath(curandState& localState, int x, int y, int 
 
         setD_vcm(lightPath, currIdx, curr_d_vcm);
         setD_vc(lightPath, currIdx, curr_d_vc);
-        setD_vm(lightPath, currIdx, curr_d_vm);
+        //setD_vm(lightPath, currIdx, curr_d_vm);
 
         // photon data (for merging)
 
-        int photonInd = atomicAdd(globalPhotonIndex, 1);
-        
-        if (photonInd < w * h * maxDepth)
+        if (!currDelta)
         {
-            setPos(photons, photonInd, currPos);
-            setWi(photons, photonInd, currWo);
-            setNormal(photons, photonInd, currNormal);
-            setBeta(photons, photonInd, currBeta);
+            int photonInd = atomicAdd(globalPhotonIndex, 1);
+        
+            if (photonInd < w * h * maxDepth)
+            {
+                setPos(photons, photonInd, currPos);
+                setWi(photons, photonInd, currWo);
+                setNormal(photons, photonInd, currNormal);
+                setBeta(photons, photonInd, currBeta);
 
-            setD_vcm(photons, photonInd, curr_d_vcm);
-            setD_vc(photons, photonInd, curr_d_vc);
-            setD_vm(photons, photonInd, curr_d_vm);
+                setD_vcm(photons, photonInd, curr_d_vcm);
+                //setD_vc(photons, photonInd, curr_d_vc);
+                setD_vm(photons, photonInd, curr_d_vm);
+            }
         }
+        
         
         
         //---------------------------------------------------------------------------------------------------------------------------------------------------
@@ -2231,16 +2257,15 @@ __global__ void doLightPass(curandState* rngStates, Camera camera, VCMPathVertic
     //printf("end path gen\n");
     lightPathLengths[pixelIdx] = lightPathLength;
 
-    // assume equal number of merge and connect vertices
     float eta_vcm = (float)(w * h) * PI * mergeRadius * mergeRadius;
 
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     // Perform special case of the connection: what if the light ray just connected straight to the camera?
     //---------------------------------------------------------------------------------------------------------------------------------------------------
     
-    for (int s = 2; (s <= lightPathLength) && (BDPT_LIGHTTRACE); s++)
+    for (int s = 2; (s <= lightPathLength + 1) && (BDPT_LIGHTTRACE); s++)
     {
-        int lightPathIDX = pathBufferIdx(w, h, x, y, s - 1);
+        int lightPathIDX = pathBufferIdx(w, h, x, y, s - 2);
 
         int lightInd;
         int materialID;
@@ -2337,6 +2362,9 @@ __global__ void doLightPass(curandState* rngStates, Camera camera, VCMPathVertic
             
             float wLight = traceRatio * traceRatio * (pdf_currRev_area * pdf_currRev_area) / (numLightSample * numLightSample) * 
                 (eta_vcm * eta_vcm + getD_vcm(lightPath, lightPathIDX) + pdf_oneBeforePrevRev_SA * pdf_oneBeforePrevRev_SA * getD_vc(lightPath, lightPathIDX));
+            
+            wLight = traceRatio * (pdf_currRev_area) / (numLightSample) * 
+                (eta_vcm + getD_vcm(lightPath, lightPathIDX) + pdf_oneBeforePrevRev_SA * getD_vc(lightPath, lightPathIDX));
 
             misWeight = 1.0f / (1.0f + wLight + wEye);
 
@@ -2362,33 +2390,27 @@ __device__ inline bool connectImplicitHit(
     float4 lightPos,
     float4 lightNorm,
     float4 throughput,
-    float2 lightUV,
-    int eyeMatID,
-    int eyeLightInd,
-    bool eyeBackface,
+    int lightInd,
     float d_vc,
     float d_vcm,
     float4 prevPos,
     bool prevDelta,
     Triangle* lights, 
     int lightNum,
-    BVHnode* BVH, 
-    int* BVHindices, 
     Vertices* vertices,
-    Triangle* scene,
     float4& unweightedContribution,
     float& misWeight
 )
 {
-    float4 lightToPrev = lightPos - prevPos;
+    float4 lightToPrev = prevPos - lightPos;
     float distanceSQR = lengthSquared(lightToPrev);
     float4 lightToPrev_unit = normalize(lightToPrev);
-    float cosLight = fabsf(dot(lightNorm, lightToPrev_unit));
+    float cosLight = dot(lightNorm, lightToPrev_unit);
 
-    if (eyeLightInd == -1)
+    if (lightInd == -1)
         return false;
     
-    Triangle light = lights[eyeLightInd];
+    Triangle light = lights[lightInd];
     float4 Le = light.emission;
 
     float pdf_connect;
@@ -2417,15 +2439,20 @@ __device__ inline bool connectImplicitHit(
     float wEye = pdf_connect * pdf_connect * d_vcm + 
         pdf_trace * pdf_trace * pdf_oneBeforePrevRev_SA * pdf_oneBeforePrevRev_SA *
         d_vc;
+    wEye = pdf_connect * d_vcm + 
+        pdf_trace * pdf_oneBeforePrevRev_SA *
+        d_vc;
 
     misWeight = 1.0f / (1.0f + wEye);
     unweightedContribution = Le * throughput;
 
-    float lum = luminance(unweightedContribution);
-    if (lum > MAX_FIREFLY_LUM)
+    if (misWeight < 0)
     {
-        unweightedContribution *= (MAX_FIREFLY_LUM / lum);
+        //printf("pconn %f, dvcm %f, oneBfore %f, dvc %f\n", pdf_connect, d_vcm, pdf_oneBeforePrevRev_SA, d_vc);
     }
+
+    //if (misWeight < 0 || throughput.x < 0 || throughput.y < 0 || throughput.z < 0)
+    //    printf("misweight: %f, <%f, %f, %f> * <%f, %f, %f>\n", misWeight, Le.x, Le.y, Le.z, throughput.x, throughput.y, throughput.z);
 
     return true;
 }
@@ -2509,6 +2536,8 @@ __device__ inline bool connectNEE(
     
     float wEye = traceRatio * traceRatio * pdf_currRev_area * pdf_currRev_area * 
         (eta_vcm * eta_vcm + d_vcm + pdf_oneBeforePrevRev_SA * pdf_oneBeforePrevRev_SA * d_vc);
+    wEye = traceRatio * pdf_currRev_area * 
+        (eta_vcm + d_vcm + pdf_oneBeforePrevRev_SA * d_vc);
     
     misWeight = 1.0f / (1.0f + wLight + wEye);
     unweightedContribution = nee_contribution_unweighted * eyethroughput;
@@ -2516,6 +2545,7 @@ __device__ inline bool connectNEE(
     return true;
 }
 
+// assumes that both surfaces are not delta
 __device__ inline bool connectGeneral(
     curandState& localState,
     float4 eyePos,
@@ -2629,6 +2659,9 @@ __device__ inline bool connectGeneral(
 
     float wEye = pdf_eyeRev_area * pdf_eyeRev_area * (eta_vcm * eta_vcm + eyeD_vcm + pdf_oneBeforeEyeRev_SA * pdf_oneBeforeEyeRev_SA * eyeD_vc);
     float wLight = pdf_lightRev_area * pdf_lightRev_area * (eta_vcm * eta_vcm + lightD_vcm + pdf_oneBeforeLightRev_SA * pdf_oneBeforeLightRev_SA * lightD_vc);
+
+    wEye = pdf_eyeRev_area * (eta_vcm + eyeD_vcm + pdf_oneBeforeEyeRev_SA * eyeD_vc);
+    wLight = pdf_lightRev_area * (eta_vcm + lightD_vcm + pdf_oneBeforeLightRev_SA * lightD_vc);
     
     float4 f_eye;
     f_eval(materials, eyeMatID, textures, lightToEye_localAtEye, 
@@ -2690,14 +2723,13 @@ __global__ void doEyePass(curandState* rngStates, Camera camera, VCMPathVertices
     for (int depth = 0; depth < maxDepth; depth++)
     {
         int currIdx = pathBufferIdx(w, h, x, y, depth);
-        int prevIdx = (depth == 0) ? -1 : pathBufferIdx(w, h, x, y, depth-1);
 
         Intersection intersect = Intersection();
         BVHSceneIntersect(r, BVH, BVHindices, vertices, scene, intersect);
 
         if (!intersect.valid)
         {
-            return;
+            break;
         }
         
         float2 currUV = intersect.uv;
@@ -2776,6 +2808,10 @@ __global__ void doEyePass(curandState* rngStates, Camera camera, VCMPathVertices
             curr_d_vc = 0.0f;
             curr_d_vm = 0.0f;
 
+            curr_d_vcm = (pdf_connect * numLightSample) / (pdf_trace * pdfFwd_area);
+            curr_d_vc = 0.0f;
+            curr_d_vm = 0.0f;
+
             prev_d_vcm = curr_d_vcm;
             prev_d_vc = curr_d_vc;
             prev_d_vm = curr_d_vm;
@@ -2788,6 +2824,10 @@ __global__ void doEyePass(curandState* rngStates, Camera camera, VCMPathVertices
             curr_d_vcm = 0.0f;
             curr_d_vc = (G * G / (pdfFwd_area * pdfFwd_area)) * (pdf_onebeforePrevRev_SA * pdf_onebeforePrevRev_SA * prev_d_vc);
             curr_d_vm = (G * G / (pdfFwd_area * pdfFwd_area)) * (pdf_onebeforePrevRev_SA * pdf_onebeforePrevRev_SA * prev_d_vm);
+
+            curr_d_vcm = 0.0f;
+            curr_d_vc = (G / (pdfFwd_area)) * (pdf_onebeforePrevRev_SA * prev_d_vc);
+            curr_d_vm = (G / (pdfFwd_area)) * (pdf_onebeforePrevRev_SA * prev_d_vm);
 
             prev_d_vcm = curr_d_vcm;
             prev_d_vc = curr_d_vc;
@@ -2805,17 +2845,17 @@ __global__ void doEyePass(curandState* rngStates, Camera camera, VCMPathVertices
             curr_d_vm = (G * G / (pdfFwd_area * pdfFwd_area)) * (1.0f + 
                 (prev_d_vcm) / (eta_vcm * eta_vcm) + pdf_onebeforePrevRev_SA * pdf_onebeforePrevRev_SA * prev_d_vm);
 
+            curr_d_vcm = 1.0f / (pdfFwd_area);
+            curr_d_vc = (G / (pdfFwd_area)) * (eta_vcm + 
+                prev_d_vcm + pdf_onebeforePrevRev_SA * prev_d_vc);
+            curr_d_vm = (G / (pdfFwd_area)) * (1.0f + 
+                (prev_d_vcm) / (eta_vcm) + pdf_onebeforePrevRev_SA * prev_d_vm);
+
             prev_d_vcm = curr_d_vcm;
             prev_d_vc = curr_d_vc;
             prev_d_vm = curr_d_vm;
             pdf_onebeforePrevRev_SA = pdfRev_solidAngle;
         }
-
-        //printf("EYE PATH dvcm %f, dvc %f, dvm %f\n", curr_d_vcm ,curr_d_vc, curr_d_vm);
-
-        int currLightInd = -2;
-        if (lengthSquared(scene[intersect.triIDX].emission) > EPSILON)
-            currLightInd = scene[intersect.triIDX].lightInd;
 
         //---------------------------------------------------------------------------------------------------------------------------------------------------
         // Perform Connection. (this may be slower, but cuts down on VRAM, which is really the problem)
@@ -2830,19 +2870,23 @@ __global__ void doEyePass(curandState* rngStates, Camera camera, VCMPathVertices
             if (currDelta)
                 break;
 
-            float4 unweightedContribution = f4(-1.0f);
-            float misWeight = -0.00001f;
+            float4 unweightedContribution = f4(0.0f);
+            float misWeight = 0.0f;
             bool validConnection = false;
             if (s == 0)
             {
+                int currLightInd = -2;
+                if (lengthSquared(scene[intersect.triIDX].emission) > EPSILON)
+                    currLightInd = scene[intersect.triIDX].lightInd;
+                
                 if ((!BDPT_NAIVE) || (currLightInd == -2) || currBackface)
                     continue;
 
-                validConnection = connectImplicitHit(
-                    currPos, currNormal, currBeta, currUV, currMatID, currLightInd, currBackface, 
+                connectImplicitHit(
+                    currPos, currNormal, currBeta, currLightInd,
                     curr_d_vc, curr_d_vcm, 
                     prevPos, prevWasDelta, 
-                    lights, lightNum, BVH, BVHindices, vertices, scene, 
+                    lights, lightNum, vertices,
                     unweightedContribution, misWeight
                 );
             }
@@ -2851,7 +2895,7 @@ __global__ void doEyePass(curandState* rngStates, Camera camera, VCMPathVertices
                 if (!BDPT_NEE)
                     continue;
                 
-                validConnection = connectNEE(
+                connectNEE(
                     localState,
                     currPos, currNormal, currBeta, currUV, currMatID, currBackface, 
                     curr_d_vc, curr_d_vcm, 
@@ -2883,9 +2927,8 @@ __global__ void doEyePass(curandState* rngStates, Camera camera, VCMPathVertices
 
                 float lightD_vc = getD_vc(lightPath, lightPathIDX);
                 float lightD_vcm = getD_vcm(lightPath, lightPathIDX);
-                //printf("s = %d, lightThroughput = <%f, %f, %f>\n",s, lightThroughput.x, lightThroughput.y, lightThroughput.z);
 
-                validConnection = connectGeneral(
+                connectGeneral(
                     localState,
                     currPos, currNormal, currBeta, currUV, currMatID,
                     curr_d_vc, curr_d_vcm, 
@@ -2898,22 +2941,31 @@ __global__ void doEyePass(curandState* rngStates, Camera camera, VCMPathVertices
                 );
             }
 
+            float4 contribution;
             if (BDPT_PAINTWEIGHT)
-                colorSum += f4(misWeight);
+                contribution = f4(misWeight);
             else if (BDPT_DOMIS)
-                colorSum += unweightedContribution * misWeight;
+                contribution = unweightedContribution * misWeight;
             else
-                colorSum += unweightedContribution;
+                contribution = unweightedContribution;
 
-            //if (validConnection)
-                //printf("s = %d unweighted is <%f, %f, %f> mis weight is %f\n",s, unweightedContribution.x, unweightedContribution.y, unweightedContribution.z, misWeight);
+            float lum = luminance(contribution);
+            if (lum > MAX_FIREFLY_LUM)
+            {
+                contribution *= (MAX_FIREFLY_LUM / lum);
+            }
+
+            //if (misWeight < 0)
+            //    printf("depth: %d\n", depth);
+
+            colorSum += contribution;
         }
 
         //---------------------------------------------------------------------------------------------------------------------------------------------------
         // Perform Merging.
         //---------------------------------------------------------------------------------------------------------------------------------------------------
 
-        if (!currDelta)
+        if (!currDelta && VCM_DOMERGE)
         {
             int3 centerIndex = GetGridIndex(currPos, sceneMin, mergeRadius);
 
@@ -2944,7 +2996,7 @@ __global__ void doEyePass(curandState* rngStates, Camera camera, VCMPathVertices
                             float4 diff = currPos - photonPos;
                             float distSq = dot(diff, diff);
 
-                            if (distSq <= radiusSq && dot(photonNorm, currNormal) > 0.93f) {
+                            if (distSq <= radiusSq) {
                                 float lightD_vcm = getD_vcm(photons_sorted, i);
                                 float lightD_vm = getD_vm(photons_sorted, i);
 
@@ -2956,31 +3008,43 @@ __global__ void doEyePass(curandState* rngStates, Camera camera, VCMPathVertices
                                 float4 eyeToPrev_local;
                                 toLocal(eyeToPrev, currNormal, eyeToPrev_local);
 
-                                float4 photonPrevToEye_local;
-                                toLocal(-photonToPrev, currNormal, photonPrevToEye_local);
+                                float4 photonPrevToPhoton_local;
+                                toLocal(-photonToPrev, currNormal, photonPrevToPhoton_local);
 
                                 float eyeRevPDF_SA;
-                                pdf_eval(materials, currMatID, textures, photonPrevToEye_local, eyeToPrev_local, etaI, etaT, eyeRevPDF_SA, currUV);
+                                // photon's previous to photon and eye to eye's prev
+                                pdf_eval(materials, currMatID, textures, photonPrevToPhoton_local, eyeToPrev_local, etaI, etaT, eyeRevPDF_SA, currUV);
 
                                 float lightRevPDF_SA;
-                                pdf_eval(materials, currMatID, textures, -eyeToPrev_local, -photonPrevToEye_local, etaI, etaT, lightRevPDF_SA, currUV);
+                                // eye's prev to eye, and photon to photon's prev
+                                pdf_eval(materials, currMatID, textures, -eyeToPrev_local, -photonPrevToPhoton_local, etaI, etaT, lightRevPDF_SA, currUV);
                             
                                 float wEye = (curr_d_vcm) / (eta_vcm * eta_vcm) + eyeRevPDF_SA * eyeRevPDF_SA * curr_d_vm;
                                 float wLight = (lightD_vcm) / (eta_vcm * eta_vcm) + lightRevPDF_SA * lightRevPDF_SA * lightD_vm;
 
+                                wEye = (curr_d_vcm) / (eta_vcm) + eyeRevPDF_SA * curr_d_vm;
+                                wLight = (lightD_vcm) / (eta_vcm) + lightRevPDF_SA * lightD_vm;
+
                                 float misWeight = 1.0f / (1.0f + wEye + wLight);
 
                                 float4 f_val;
-                                f_eval(materials, currMatID, textures, photonPrevToEye_local, eyeToPrev_local, etaI, etaT, f_val, currUV);
+                                f_eval(materials, currMatID, textures, photonPrevToPhoton_local, eyeToPrev_local, etaI, etaT, f_val, currUV);
 
                                 float4 unweightedContribution = getBeta(photons_sorted, i) * f_val * currBeta / (PI * radiusSq * w * h);
 
-                                colorSum += unweightedContribution * misWeight;
+                                if (BDPT_PAINTWEIGHT)
+                                    colorSum += f4(misWeight);
+                                else if (BDPT_DOMIS)
+                                    colorSum += unweightedContribution * misWeight;
+                                else
+                                    colorSum += unweightedContribution;
                             }
                         }
                     }
                 }
             }
+            if (DO_SPPM) // SPPM only gathers density one time
+                break;
         }
         //---------------------------------------------------------------------------------------------------------------------------------------------------
         // Set up next interaction
@@ -3041,7 +3105,7 @@ __global__ void reorderPhotons(
     photons_sorted.beta_y[i] = photons.beta_y[src];
     photons_sorted.beta_z[i] = photons.beta_z[src];
     photons_sorted.packedWi[i] = photons.packedWi[src];
-    photons_sorted.d_vc[i] = photons.d_vc[src];
+    //photons_sorted.d_vc[i] = photons.d_vc[src];
     photons_sorted.d_vcm[i] = photons.d_vcm[src];
     photons_sorted.d_vm[i] = photons.d_vm[src];
 }

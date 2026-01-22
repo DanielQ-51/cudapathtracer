@@ -571,7 +571,8 @@ enum IntegratorChoice {
     UNIDIRECTIONAL = 0,
     BIDIRECTIONAL = 1,
     NAIVE_UNIDIRECTIONAL = 2,
-    VCM = 3
+    VCM = 3,
+    SPPM = 4
 };
 
 enum TransportMode {
@@ -582,9 +583,10 @@ enum TransportMode {
 __host__ inline int matchIntegrator(std::string name)
 {
     if (name == "UNIDIRECTIONAL") return 0;
-    else if (name == "BIDIRECTIONAL") return 1;
+    else if (name == "BIDIRECTIONAL" || name == "BDPT") return 1;
     else if (name == "NAIVE_UNIDIRECTIONAL") return 2;
     else if (name == "VCM") return 3;
+    else if (name == "SPPM") return 4;
 
     std::cerr << "Invalid Integrator Choice!\n";
     return -1;
@@ -821,6 +823,8 @@ struct RenderConfig {
     bool bdptDrawPath = false;
     bool bdptDoMis = false;
     bool bdptPaintWeight = false;
+    bool vcmDoMerge = false;
+    bool doSPPM = false;
 
     float vcmMergeConst = 0.0f;
     float vcmInitialMergeRadiusMultiplier = 0.0f;
@@ -923,6 +927,7 @@ __host__ inline bool loadConfig(const std::string& filepath, RenderConfig& confi
             else if (key == "Pinhole Camera") config.pinholeCamera = parseBool(value);
             else if (key == "SAMPLE_ENVIRONMENT") config.sampleEnvironment = parseBool(value);
             else if (key == "Post Process") config.postProcess = parseBool(value);
+            else if (key == "VCM_DOMERGE") config.vcmDoMerge = parseBool(value);
 
             // Vectors & Floats
             else if (key == "Camera Position") config.camPos = parseVec3(value);
@@ -966,8 +971,6 @@ struct VCMPathVertices
     unsigned int* packedNormal;
     unsigned int* packedWo;
 
-    // need to do shared exponent packing
-    //unsigned int* packedBeta;
     half* beta_x;
     half* beta_y;
     half* beta_z;
@@ -983,7 +986,7 @@ struct VCMPathVertices
     unsigned int* packedInfo;
     
     float* d_vc;
-    float* d_vm;
+    //float* d_vm;
     float* d_vcm;
 };
 
@@ -1145,14 +1148,6 @@ __device__ __forceinline__ void setD_vc(VCMPathVertices& x, int idx, float val) 
     x.d_vc[idx] = val;
 }
 
-__device__ __forceinline__ float getD_vm(const VCMPathVertices& x, int idx) {
-    return x.d_vm[idx];
-}
-
-__device__ __forceinline__ void setD_vm(VCMPathVertices& x, int idx, float val) {
-    x.d_vm[idx] = val;
-}
-
 __device__ __forceinline__ float getD_vcm(const VCMPathVertices& x, int idx) {
     return x.d_vcm[idx];
 }
@@ -1162,7 +1157,7 @@ __device__ __forceinline__ void setD_vcm(VCMPathVertices& x, int idx, float val)
 }
 
 /*
-Struct containing photon data for vcm.
+Struct containing photon data for vcm. TODO: IMPLEMENT BACKFACE FLAG HERE. CRUCIAL IF YOU PUT DOUBLE SIDED MATERIALS!!!!
 */
 struct Photons
 {
@@ -1178,7 +1173,7 @@ struct Photons
     half* beta_y;
     half* beta_z;
 
-    float* d_vc;
+    //float* d_vc;
     float* d_vm; 
     float* d_vcm;
 };
@@ -1219,14 +1214,6 @@ __device__ __forceinline__ void setBeta(Photons& x, int idx, float4 b) {
     x.beta_x[idx] = __float2half(b.x);
     x.beta_y[idx] = __float2half(b.y);
     x.beta_z[idx] = __float2half(b.z);
-}
-
-__device__ __forceinline__ float getD_vc(const Photons& x, int idx) {
-    return x.d_vc[idx];
-}
-
-__device__ __forceinline__ void setD_vc(Photons& x, int idx, float val) {
-    x.d_vc[idx] = val;
 }
 
 __device__ __forceinline__ float getD_vm(const Photons& x, int idx) {
